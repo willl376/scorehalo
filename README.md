@@ -43,7 +43,9 @@ Crash-safe: convert resumes by skipping pages already present in manifest.json.
   - `triage.py`  page statistics (colorfulness, ink, staff-line density)
   - `engine.py`  homr wrapper
   - `validate.py` MusicXML safety checks
-  - `join.py`    per-page -> one score (+ minimal valid .mxl)
+  - `join.py`    per-page -> one score: canonical 2-staff single part (vocal
+                 staff 1 + piano staff 2, extra voice layers merged, nothing
+                 dropped), + minimal valid .mxl
   - `ui.py`      stdlib review web UI
 - `data/out-test/` example output on "Carpenters Gold Songbook 1972" pages 20-22
 
@@ -53,5 +55,8 @@ Crash-safe: convert resumes by skipping pages already present in manifest.json.
   tolerant and runs on CPU. Models download on first run (`homr --init`).
 - homr neglects dynamics/articulation/double-sharps and some lyrics; treat
   output as a strong draft to proofread in MuseScore — same caveat as every OMR.
+- The joiner canonicalizes each page to one part (staff 1 vocal + staff 2
+  piano); homr's sporadic extra part is merged back as extra voice layers so no
+  notes are lost and scores never carry a near-empty second part.
 - Page 1 (color cover) is correctly rejected by the triage gate
   ("skip: color-photo page"); homr itself also refuses non-notation pages.
