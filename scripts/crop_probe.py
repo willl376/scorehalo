@@ -38,7 +38,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pysrc"))
 from scorehalo.layout import analyze_page, crop_systems  # noqa: E402
 from scorehalo.engine import run_homr  # noqa: E402
 
-DEFAULT_PDF = "/home/wburt59/Documents/Carpenters Gold Songbook 1972.pdf"
+# No machine-specific path here. Point --pdf at your own scan, or set
+# SCOREHALO_PDF; the default below is only a placeholder.
+DEFAULT_PDF = os.environ.get("SCOREHALO_PDF", "")
 
 
 def xml_stats(path):
