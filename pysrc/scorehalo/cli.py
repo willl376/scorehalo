@@ -50,7 +50,7 @@ def cmd_convert(args):
         work_dir = os.path.join(out_dir, "homr")
         os.makedirs(out_dir, exist_ok=True)
 
-    manifest = {"version": __version__, "source": src, "pages": [], "ok": True}
+    manifest = {"version": __version__, "source": src, "dpi": args.dpi, "pages": [], "ok": True}
     manifest_path = os.path.join(out_dir, "manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path) as fh:
@@ -114,6 +114,21 @@ def cmd_convert(args):
     return 0
 
 
+def _pdf_page_size_pts(src):
+    """Return (width, height) of the first page, in points (1/72in)."""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(src)
+        pg = pdf[0]
+        w, h = pg.get_size()
+        pdf.close()
+        # pypdfium2 returns raw page geometry in points
+        return (round(w, 2), round(h, 2))
+    except Exception:
+        return (None, None)
+
+
 def _do_join(out_dir):
     from scorehalo import join
     out_dir = os.path.abspath(out_dir)
@@ -152,6 +167,14 @@ def cmd_validate(args):
     return 0 if fail == 0 else 1
 
 
+def cmd_score(args):
+    from scorehalo.score import format_report, score_files
+
+    per_stream, totals = score_files(args.truth, args.pred)
+    print(format_report(args.truth, args.pred, per_stream, totals))
+    return 0 if totals["missed"] == 0 and totals["both_wrong"] == 0 else 1
+
+
 def cmd_serve(args):
     from scorehalo.ui import serve_ui
     return serve_ui(args.out_dir, args.port)
@@ -178,6 +201,22 @@ def main(argv=None):
     join_cmd = sub.add_parser("join", help="assemble per-page MusicXML into one score + .mxl")
     join_cmd.add_argument("out_dir")
     join_cmd.set_defaults(fn=cmd_join)
+
+    from scorehalo.compare import cmd_compare
+
+    cmp_cmd = sub.add_parser(
+        "compare",
+        help="render score.mxl with MuseScore and diff vs source pages",
+    )
+    cmp_cmd.add_argument("out_dir")
+    cmp_cmd.add_argument("--render-dir", help="where to keep rendered pages (default <out>/compare)")
+    cmp_cmd.add_argument("--musescore", help="path to MuseScore binary (auto-detected)")
+    cmp_cmd.set_defaults(fn=cmd_compare)
+
+    sc = sub.add_parser("score", help="note-level diff of a prediction against a reference MusicXML")
+    sc.add_argument("--truth", required=True, help="reference MusicXML (labels)")
+    sc.add_argument("--pred", required=True, help="MusicXML to grade")
+    sc.set_defaults(fn=cmd_score)
 
     srv = sub.add_parser("serve", help="start the review UI")
     srv.add_argument("out_dir", nargs="?", default="scorehalo-out")
