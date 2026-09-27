@@ -58,13 +58,25 @@ def _remap_voices(part, offset):
 
 
 def _force_staff(notes, staff_no):
-    """Tag every note with <staff>n</staff>, replacing any existing tag."""
+    """Tag every note with <staff>n</staff>, replacing any existing tag.
+
+    MusicXML fixes the child order of a note (pitch, duration, ..., voice,
+    type, ..., staff, beam, notations, ...), so a newly created <staff> is
+    inserted before <beam>/<notations>/<lyric> rather than appended.
+    """
+    after = ("beam", "notations", "lyric", "play", "listen")
     for el in notes:
         if _local(el.tag) != "note":
             continue
         st = el.find("staff")
         if st is None:
-            st = ET.SubElement(el, "staff")
+            st = ET.Element("staff")
+            index = len(list(el))
+            for i, child in enumerate(list(el)):
+                if _local(child.tag) in after:
+                    index = i
+                    break
+            el.insert(index, st)
         st.text = str(staff_no)
 
 
@@ -94,15 +106,22 @@ def _split_parall(part):
     return list(clean())
 
 
-def _merge_regions(page_measures, extras):
+def _merge_regions(page_measures, extras, first_staff=3, total_staves=None):
     """Merge extra parallel regions into the same-numbered measures.
 
-    Every extra region is a bass/overflow staff: its notes go to staff 2, its
-    attributes contribute a bass clef, voices already remapped by caller.
+    Every extra region is a distinct parallel layer (measured: 0-10% of its
+    notes duplicate the base exactly -- it is a real second voice, not
+    redundant), so it is preserved.  Each region gets its OWN staff rather
+    than being crammed onto staff 2: staff 2 already carries the base part's
+    bass voices (5,6,7,8), and stacking a sixth voice there makes MuseScore's
+    importer reject the whole file (rc=40).  Verified: same content on its own
+    staff imports cleanly.
+
     Regions run in lockstep with the base part, so measures are matched by
     ordinal position within the page, not by measure number.
     """
-    for extra in extras:
+    for index, extra in enumerate(extras):
+        staff_no = first_staff + index
         for i, m in enumerate(extra.findall("measure")):
             target = page_measures[i] if i < len(page_measures) else None
             if target is None:
@@ -110,7 +129,7 @@ def _merge_regions(page_measures, extras):
             notes = [c for c in m if _local(c.tag) == "note"]
             if not notes:
                 continue
-            _force_staff(notes, 2)
+            _force_staff(notes, staff_no)
             _strip_direction(notes)
             # group by voice; homr wrote each voice contiguously with backups
             # relative to its own stream, so re-emit clean groups separated by
@@ -164,37 +183,58 @@ def _merge_regions(page_measures, extras):
             if amp is None:
                 amp = ET.Element("attributes")
                 target.insert(0, amp)
-            # sprinkle a staves=2 (grand staff) declaration if absent
-            if amp.find("staves") is None:
+            if total_staves is not None and amp.find("staves") is None:
                 st = ET.SubElement(amp, "staves")
-                st.text = "2"
-            # ensure staff 2 carries a bass clef from the region's own attrs
-            has_bass = any(
-                _local(c.tag) == "clef"
-                and c.find("sign") is not None
-                and c.find("sign").text == "F"
-                for c in amp
-            )
-            if not has_bass:
+                st.text = str(total_staves)
+            # this staff needs its own clef; clone the region's bass clef if it
+            # declared one, otherwise a plain F clef
+            if not _has_clef_for(amp, staff_no):
                 src_clefs = m.findall("attributes/clef")
                 use = next(
-                    (c for c in src_clefs if c.find("sign") is not None and c.find("sign").text == "F"),
+                    (
+                        c
+                        for c in src_clefs
+                        if c.find("sign") is not None and c.find("sign").text == "F"
+                    ),
                     None,
                 )
                 cloned = ET.fromstring(ET.tostring(use)) if use is not None else None
-                if cloned is None and not any(_local(c.tag) == "clef" for c in amp):
+                if cloned is None:
                     cloned = ET.Element("clef")
                     ET.SubElement(cloned, "sign").text = "F"
                     ET.SubElement(cloned, "line").text = "4"
-                if cloned is not None:
-                    cloned.set("number", "2")
-                    # keep child order: put clef where homr usually has it
-                    amp.append(cloned)
-            # renumber duplicates so MuseScore accepts a staves=2 part
-            for idx, clef_el in enumerate(
-                [c for c in amp if _local(c.tag) == "clef"]
-            ):
-                clef_el.set("number", str(idx + 1))
+                cloned.set("number", str(staff_no))
+                amp.append(cloned)
+
+
+def _has_clef_for(amp, staff_no):
+    return any(
+        _local(c.tag) == "clef" and c.get("number", "1") == str(staff_no)
+        for c in amp
+    )
+
+
+def _set_staves(measure, count):
+    """Force an EXISTING <attributes> block to declare `count` staves.
+
+    Each page's first measure carries its own <staves> (a single-staff page
+    declares 1), and <staves> is inherited by the rest of the part -- so a
+    later page's declaration would silently shrink the part and orphan the
+    notes we placed on staff 3+.  Measures without an <attributes> block are
+    left alone: they inherit, and synthesising a block per measure would add
+    hundreds of redundant declarations.
+    """
+    for child in measure:
+        if _local(child.tag) != "attributes":
+            continue
+        for g in child:
+            if _local(g.tag) == "staves":
+                g.text = str(count)
+                return True
+        st = ET.SubElement(child, "staves")
+        st.text = str(count)
+        return True
+    return False
 
 
 def join_pages(page_xmls, out_xml, out_mxl=None, page_w=None, page_h=None):
@@ -226,8 +266,14 @@ def join_pages(page_xmls, out_xml, out_mxl=None, page_w=None, page_h=None):
     merged = ET.SubElement(new_root, "part", {"id": "P1"})
     counter = 0
 
-    for page_no, root in enumerate(roots):
+    page_parts = []
+    for root in roots:
         parts = root.findall(".//part")
+        page_parts.append(parts)
+    max_extras = max((len(p) - 1 for p in page_parts if p), default=0)
+    total_staves = 2 + max_extras if max_extras else None
+
+    for page_no, parts in enumerate(page_parts):
         base = parts[0] if parts else None
         if base is None:
             continue
@@ -254,9 +300,14 @@ def join_pages(page_xmls, out_xml, out_mxl=None, page_w=None, page_h=None):
                     m2.append(child)
                     continue
                 m2.append(child)
-        # merge extra parallel regions into the same measures
+            if total_staves is not None:
+                _set_staves(m2, total_staves)
+        # merge extra parallel regions into the same measures, each on its
+        # own staff so the base's bass voices are not overcrowded
         if extras:
-            _merge_regions(page_measures, extras)
+            _merge_regions(
+                page_measures, extras, first_staff=3, total_staves=total_staves
+            )
 
     ET.indent(new_root, space="  ")
     ET.ElementTree(new_root).write(out_xml, encoding="UTF-8", xml_declaration=True)

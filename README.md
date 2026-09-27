@@ -55,6 +55,21 @@ clef/content mismatches. Two things worth knowing when reading the output:
   (`rc=40`), so per-page measure damage is not by itself fatal; the failure lives
   in the joiner's merge. Any fix belongs there.
 
+## Joining pages
+
+`scorehalo join` concatenates pages into one part. homr emits each detected
+staff region as its own part, and those regions run *in parallel* (same time),
+so the extra ones are merged back into the matching measures.
+
+Each merged region gets **its own staff** (3, 4, ...), not staff 2. Staff 2
+already carries the base part's bass voices, and stacking a sixth voice there
+makes MuseScore's importer reject the entire file (`rc=40`, no PDF at all).
+Giving each region a separate staff imports cleanly with no notes lost.
+
+The cost is a denser layout: 16 source pages render as 24, so
+`scorehalo compare`'s index-based page-to-page mapping no longer lines up and
+its "defect" verdicts are misalignment rather than transcription errors.
+
 ## Measuring accuracy
 
 `validate` only proves the MusicXML is well-formed, not that the notes are
