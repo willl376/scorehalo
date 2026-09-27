@@ -16,12 +16,69 @@ warp-tolerant transformer engine (homr) that reads notation semantically.
 ```
 PDF/image ──> render (≥300 dpi, pypdfium2)
            ──> triage gate (photo/cover/blank pages skipped, staff-likeness scored)
+           ──> layout: deskew, find staff lines, group staves, group systems
            ──> [--enhance] adaptive contrast + sharpen
-           ──> homr (transformer OMR, per page, CPU/ONNX)
+           ──> homr PER STAFF (transformer OMR, CPU/ONNX)   <- not per page
+           ──> merge the per-staff parts back into one part
            ──> MusicXML 4.0 validation (well-formed, note counts, namespace bug checks)
            ──> join pages -> score.musicxml / score.mxl (for MuseScore)
            ──> scorehalo serve: review UI (per-page status, downloads, logs)
 ```
+
+## Finding the staves
+
+homr reads a whole page badly. On page 20 of the 1972 Carpenters book it
+reports **2 staves on a page that has 8** — it merges the systems and loses
+most of the music. The cause is not image quality: that page is a clean,
+deskewed, 300-dpi render. The cause is that we handed a 6-system page to a
+model that expects to find the systems itself.
+
+So we find the staves ourselves, with classical CV, and hand homr **one staff
+at a time** (`layout.py`):
+
+1. deskew by dominant line angle
+2. find long horizontal ink runs, merge collinear fragments
+3. estimate staff spacing from the median gap between lines
+4. group lines into staves
+5. group staves into systems using the **vertical rules / brackets** that
+   span them — gaps between staves are *not* a reliable signal, brackets are
+6. crop each staff and run homr on the crop, then merge the results
+
+Per-staff cropping on p0020 recovers **8 of 8 staves** where the whole page
+yielded 2, every run `rc=0`.
+
+### Two bugs the measurement caught
+
+**Near-duplicate lines.** `merge_collinear` only merged candidates that
+overlapped horizontally, so a beam or ledger fragment sitting *beside* a staff
+line survived as a second "line". One 2px sliver was enough to corrupt the
+median-gap spacing estimate for the entire page — p0022 measured **11.7px
+against a true 20px**, and real 5-line staves reported 6 lines. `dedupe_slivers()`
+fixes it: clean pages went from 5 of 16 to 13 of 16, and p0022 collapsed from 8
+phantom staves to 1 honest staff.
+
+**"Staff spacing is a book constant" was wrong.** It is tempting to calibrate
+spacing once on a page you have verified and hard-code it. Measured across 16
+pages, spacing is **16.0 to 20.5px**, clustering by *adjacent* pages
+(p0024/25/26 all 16.0; p0027/28/29 all 20.0). Hard-coding p0020's 19.5px would
+have broken 9 of 16 pages. Estimate per page.
+
+### Checking the detector's own arithmetic
+
+A real staff is 5 lines at near-equal spacing. That is a checkable constraint,
+so `validate_layout.py` tests it without needing labels:
+
+```
+python scripts/validate_layout.py data/out-band --json /tmp/val.json
+```
+
+Current result over the 16 converted pages: **167 staves, 3 outliers, zero
+phantoms.** All three outliers are benign — real staves carrying a ledger line
+or a faded line, not bracket edges or photo borders misread as staves.
+
+Recognising all 167 staves (≈75s each, 4 cores) is a ~1h run driven by
+`scripts/per_staff_all.py`; it appends to `per_staff.jsonl` as it goes and
+resumes where it left off. Corpus-wide note totals: *run in progress.*
 
 ## Usage
 
@@ -102,6 +159,8 @@ degradation, so this is the easy end of the range, not real-book accuracy.
   - `pdf.py`  pypdfium2 rendering
   - `preprocess.py` restorer + photo/not-music gate
   - `triage.py`  page statistics (colorfulness, ink, staff-line density)
+  - `layout.py`  CV layout: deskew, staff-line detection, sliver removal,
+                 staff grouping, bracket-based system grouping, per-staff crops
   - `engine.py`  homr wrapper
   - `validate.py` MusicXML safety checks
   - `join.py`    per-page -> one score: canonical 2-staff single part (vocal
@@ -112,12 +171,20 @@ degradation, so this is the easy end of the range, not real-book accuracy.
   - `compare.py` MuseScore faithful-twin render + structural diff vs source pages
 - `scripts/make_fixture.py`  labeled fixture: known music -> degraded scan PNG
 - `scripts/bench_fixtures.py` run fixtures through convert and score them
+- `scripts/validate_layout.py`  arithmetic audit of detected staves (5 lines, even spacing)
+- `scripts/layout_audit.py`   detector vs homr staff counts across a run
+- `scripts/crop_probe.py`     system vs per-staff crop experiment (the 8-of-8 proof)
+- `scripts/per_staff_all.py`  parallel per-staff recognition over a whole run
+- `scripts/annotate_layout.py` overlay staves/systems on a page for eyeballing
 - `data/out-test/` example output on "Carpenters Gold Songbook 1972" pages 20-22
 
 ## Notes
 
 - Backend: homr (AGPL-3.0), chosen because it is camera-photo/degredation
   tolerant and runs on CPU. Models download on first run (`homr --init`).
+  ScoreHalo *invokes* homr as a separate process and does not vendor or link
+  it, so this repo is MIT-licensed. Keep it that way: adding homr's code or
+  weights here would pull the whole project into AGPL-3.0.
 - homr neglects dynamics/articulation/double-sharps and some lyrics; treat
   output as a strong draft to proofread in MuseScore — same caveat as every OMR.
 - The joiner canonicalizes each page to one part (staff 1 vocal + staff 2
