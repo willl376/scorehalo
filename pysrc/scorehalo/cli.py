@@ -187,6 +187,21 @@ def cmd_score(args):
     return 0 if totals["missed"] == 0 and totals["both_wrong"] == 0 else 1
 
 
+def cmd_hear(args):
+    from scorehalo.hear import audition
+
+    audition(
+        args.score,
+        work_dir=args.out,
+        musescore_bin=args.musescore,
+        soundfont=args.soundfont,
+        player=args.player,
+        keep=args.keep,
+        play_it=not args.no_play,
+    )
+    return 0
+
+
 def cmd_serve(args):
     from scorehalo.ui import serve_ui
     return serve_ui(args.out_dir, args.port)
@@ -235,6 +250,18 @@ def main(argv=None):
     sc.add_argument("--truth", required=True, help="reference MusicXML (labels)")
     sc.add_argument("--pred", required=True, help="MusicXML to grade")
     sc.set_defaults(fn=cmd_score)
+
+    hear = sub.add_parser(
+        "hear", help="audition a score as audio (MusicXML -> MIDI -> WAV -> TV/speakers)"
+    )
+    hear.add_argument("score", help=".musicxml or .mxl to play")
+    hear.add_argument("--musescore", help="path to MuseScore binary (auto-detected)")
+    hear.add_argument("--soundfont", help="path to a General MIDI soundfont")
+    hear.add_argument("--player", default="pw-play", help="playback command")
+    hear.add_argument("--no-play", action="store_true", help="render only, no playback")
+    hear.add_argument("--keep", action="store_true", help="keep the temp dir")
+    hear.add_argument("--out", help="directory for the .mid/.wav (default: temp)")
+    hear.set_defaults(fn=cmd_hear)
 
     srv = sub.add_parser("serve", help="start the review UI")
     srv.add_argument("out_dir", nargs="?", default="scorehalo-out")
