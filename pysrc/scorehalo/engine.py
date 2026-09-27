@@ -24,8 +24,13 @@ def _homr_binary():
 
 def run_homr(image_path, work_dir, timeout=600):
     """Run homr on image_path. homr writes <image_basename>.musicxml next to
-    the image, so we point it at a copy inside work_dir and return the xml path
-    (or None on genuine failure)."""
+    the image, so we point it at a copy inside work_dir.
+
+    Returns a 3-tuple ``(xml_path_or_None, log_path, returncode)``. The xml
+    path is None on failure; the log always exists. Callers MUST unpack all
+    three -- the previous version of this docstring claimed a bare path and
+    that lie has already cost one caller a TypeError.
+    """
     os.makedirs(work_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     staged = os.path.join(work_dir, base + "_in.png")
