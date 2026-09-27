@@ -202,6 +202,26 @@ def cmd_hear(args):
     return 0
 
 
+def cmd_pitch(args):
+    from scorehalo.pitch import main as pitch_main
+
+    argv = []
+    if args.wav:
+        argv.append(args.wav)
+    if args.record:
+        argv.append("--record")
+    argv += ["--secs", str(args.secs)]
+    if args.target:
+        argv += ["--target", args.target]
+    if args.fmin:
+        argv += ["--fmin", str(args.fmin)]
+    if args.fmax:
+        argv += ["--fmax", str(args.fmax)]
+    if args.selftest:
+        argv.append("--selftest")
+    return pitch_main(argv)
+
+
 def cmd_serve(args):
     from scorehalo.ui import serve_ui
     return serve_ui(args.out_dir, args.port)
@@ -262,6 +282,18 @@ def main(argv=None):
     hear.add_argument("--keep", action="store_true", help="keep the temp dir")
     hear.add_argument("--out", help="directory for the .mid/.wav (default: temp)")
     hear.set_defaults(fn=cmd_hear)
+
+    pt = sub.add_parser(
+        "pitch", help="monophonic pitch tracking: hum/whistle a melody -> note sequence"
+    )
+    pt.add_argument("wav", nargs="?", help="WAV to analyze (or use --record)")
+    pt.add_argument("--record", action="store_true", help="record from the mic first")
+    pt.add_argument("--secs", type=float, default=8.0, help="recording seconds")
+    pt.add_argument("--target", help="PipeWire source id (default: system default)")
+    pt.add_argument("--fmin", type=float, help="lowest detectable Hz (default 65)")
+    pt.add_argument("--fmax", type=float, help="highest detectable Hz (default 1400)")
+    pt.add_argument("--selftest", action="store_true", help="verify on synthetic tones")
+    pt.set_defaults(fn=cmd_pitch)
 
     srv = sub.add_parser("serve", help="start the review UI")
     srv.add_argument("out_dir", nargs="?", default="scorehalo-out")
