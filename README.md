@@ -31,10 +31,29 @@ scorehalo validate dir          # re-check outputs
 scorehalo join dir              # (re)assemble score.musicxml + score.mxl
 scorehalo score --truth ref.musicxml --pred dir/p0020.musicxml
                                  # note-level accuracy diff (needs labels)
+scorehalo audit dir [--top N] [--json out.json]
+                                 # label-free structural audit (no labels needed)
 scorehalo serve dir --port 8001 # review UI at http://127.0.0.1:8001
 ```
 
 Crash-safe: convert resumes by skipping pages already present in manifest.json.
+
+## Auditing without labels
+
+`scorehalo audit` checks a converted directory for structural defects that need
+no ground truth: per-voice measure arithmetic, declared vs. inferred meter, voice
+collisions, clef/content mismatch, outlier pitches, and adjacent duplicate
+notes. It is control-validated against a known-good MuseScore-authored fixture,
+which must come out clean.
+
+On the 17-page Carpenters band it reports 283 measures whose per-voice note totals
+don't add up, 9 pages with no declared time signature, 13 voice collisions and 8
+clef/content mismatches. Two things worth knowing when reading the output:
+
+- `duplicate_adjacent` is a weak signal (severity 1) — real music repeats notes.
+- Raw single pages import into MuseScore fine while the *joined* score fails
+  (`rc=40`), so per-page measure damage is not by itself fatal; the failure lives
+  in the joiner's merge. Any fix belongs there.
 
 ## Measuring accuracy
 

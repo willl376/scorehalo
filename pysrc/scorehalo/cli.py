@@ -167,6 +167,18 @@ def cmd_validate(args):
     return 0 if fail == 0 else 1
 
 
+def cmd_audit(args):
+    from scorehalo.audit import audit_dir, format_audit
+
+    result = audit_dir(args.out_dir, top=args.top)
+    print(format_audit(result))
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(result, fh, indent=2)
+        print(f"\nwrote {args.json}")
+    return 0
+
+
 def cmd_score(args):
     from scorehalo.score import format_report, score_files
 
@@ -212,6 +224,12 @@ def main(argv=None):
     cmp_cmd.add_argument("--render-dir", help="where to keep rendered pages (default <out>/compare)")
     cmp_cmd.add_argument("--musescore", help="path to MuseScore binary (auto-detected)")
     cmp_cmd.set_defaults(fn=cmd_compare)
+
+    au = sub.add_parser("audit", help="label-free structural audit of an out dir")
+    au.add_argument("out_dir")
+    au.add_argument("--top", type=int, default=25, help="how many suspects to list")
+    au.add_argument("--json", help="write the full report here")
+    au.set_defaults(fn=cmd_audit)
 
     sc = sub.add_parser("score", help="note-level diff of a prediction against a reference MusicXML")
     sc.add_argument("--truth", required=True, help="reference MusicXML (labels)")

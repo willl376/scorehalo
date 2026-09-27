@@ -31,19 +31,65 @@ def _stream_key(part_index, staff, voice):
     return (part_index, staff or "1", voice or "1")
 
 
-def parse_streams(path):
-    """Return {(part, staff, voice): [(onset, kind, step, alter, octave, dur), ...]}."""
+def parse_document(path):
+    """Return a structural view of a MusicXML score.
+
+    {"parts": int,
+     "staves": {part_index: int},
+     "time": (beats, beat_type) or None,
+     "clefs": {(part_index, staff): sign},
+     "clef_decls": [(part_index, staff, sign), ...],
+     "streams": {(part, staff, voice): [(measure, onset, local, kind, pitch, dur, chord), ...]}}
+
+    `onset` is cumulative from the start of the part; `local` is relative to
+    the measure, which is what collision and measure-arithmetic checks need.
+    `chord` marks a note that shares its onset with the previous one, so it
+    must not be counted twice when totalling a measure.
+    """
     root = ET.parse(path).getroot()
-    streams = {}
+    doc = {
+        "parts": 0,
+        "staves": {},
+        "time": None,
+        "clefs": {},
+        "clef_decls": [],
+        "streams": {},
+    }
     parts = [p for p in root.iter() if _local(p.tag) == "part"]
+    doc["parts"] = len(parts)
     for part_index, part in enumerate(parts):
         divisions = 1
         base = Fraction(0)
+        staves = 1
         for measure in [m for m in part if _local(m.tag) == "measure"]:
             for attr in measure.iter():
-                if _local(attr.tag) == "divisions":
+                tag = _local(attr.tag)
+                if tag == "divisions":
                     divisions = int(attr.text or 1)
-                    break
+                elif tag == "staves":
+                    staves = int(attr.text or 1)
+                elif tag == "clef":
+                    number = attr.get("number")
+                    sign = None
+                    for c in attr:
+                        ctag = _local(c.tag)
+                        if ctag == "number":
+                            number = c.text
+                        elif ctag == "sign":
+                            sign = c.text
+                    if sign:
+                        doc["clef_decls"].append((part_index, number or "1", sign))
+                elif tag == "time" and doc["time"] is None:
+                    beats = beat_type = None
+                    for c in attr:
+                        ctag = _local(c.tag)
+                        if ctag == "beats":
+                            beats = c.text
+                        elif ctag == "beat-type":
+                            beat_type = c.text
+                    if beats and beat_type:
+                        doc["time"] = (int(beats), int(beat_type))
+            measure_no = measure.get("number") or str(len(doc["streams"]) + 1)
             cursor = Fraction(0)
             span = Fraction(0)
             last_onset = Fraction(0)
@@ -96,21 +142,35 @@ def parse_streams(path):
                         last_onset = onset
                     key = _stream_key(part_index, staff, voice)
                     kind = REST if is_rest or pitch is None else PITCHED
-                    streams.setdefault(key, []).append((base + onset, kind, pitch, dur))
+                    doc["streams"].setdefault(key, []).append(
+                        (measure_no, base + onset, onset, kind, pitch, dur, is_chord)
+                    )
             base += span
-    for key, notes in streams.items():
+        doc["staves"][part_index] = staves
+    for part_index, staff, sign in doc["clef_decls"]:
+        slot = doc["clefs"]
+        if slot.get((part_index, staff)) in (None, sign) or len(doc["clef_decls"]) == 1:
+            slot[(part_index, staff)] = sign
+    return doc
+
+
+def parse_streams(path):
+    """Return {(part, staff, voice): [(onset, kind, pitch, dur), ...]}, chords normalized."""
+    doc = parse_document(path)
+    streams = {}
+    for key, notes in doc["streams"].items():
         groups = {}
         for note in notes:
-            groups.setdefault(note[0], []).append(note)
+            groups.setdefault(note[1], []).append(note)
         flat = []
         for onset in sorted(groups):
             group = groups[onset]
             pitched = sorted(
-                (n for n in group if n[1] == PITCHED),
-                key=lambda n: (n[2][0] or "", n[2][1] or 0, n[2][2] or ""),
+                (n for n in group if n[3] == PITCHED),
+                key=lambda n: (n[4][0] or "", n[4][1] or 0, n[4][2] or ""),
             )
-            rests = [n for n in group if n[1] == REST]
-            flat.extend(pitched + rests)
+            rests = [n for n in group if n[3] == REST]
+            flat.extend((n[1], n[3], n[4], n[5]) for n in (pitched + rests))
         streams[key] = flat
     return streams
 
