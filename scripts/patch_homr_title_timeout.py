@@ -1,25 +1,25 @@
-"""Patch homr so a cosmetic title-OCR timeout cannot discard real recognition.
+"""Patch homr so cosmetic title detection can never destroy real recognition.
 
-homr's main.py does this, at the end of process_image():
+homr reads the page's title with RapidOCR in order to fill in MusicXML
+`<work-title>`. That is metadata. But the title path has three ways to abort a
+run that had already recognised the music, all observed in the wild:
 
-        title = title_future.result(60)     # <- hardcoded 60s, no way to configure
-        eprint("Found title:", title)
-        xml = generate_xml(xml_generator_args, result_staffs, title)
-        xml.write(xml_file)
+1. A hardcoded 60s timeout on the title future, awaited AFTER recognition and
+   BEFORE the XML is written (main.py). Observed: p0022 s1 raised TimeoutError;
+   p0030 s8, p0031 s9/s12, p0032 s6, p0036 s2 hung and were SIGKILLed by our
+   own 900s timeout -- ~75 minutes of wall time lost to one cosmetic feature.
 
-The title is the page's name, read with RapidOCR, and it is used for exactly one
-thing: `build_work(title)` -> `<work-title>` in the MusicXML. Pure metadata.
+2. An empty region above the staff. title_detection.py computes
+   `height = min(height, int(top_staff.min_y) - y)`; when homr's detected top
+   staff has min_y == 0 that is zero, so `above_staff` is an empty array and
+   `cv2.imwrite` dies on `!_img.empty()`. Observed: p0031 s3/s6, p0032 s12,
+   p0033 s3/s6/s12.
 
-But the XML is written *after* that line, so when the OCR future times out,
-homr raises TimeoutError and throws away a recognition it had already finished.
-Observed on p0022 staff 1, whose log shows the model completing inference
-("Removing tuplets from measure # 5") and then dying on the title. The music was
-recognised and lost.
+3. (guarded) any other OCR exception.
 
-This wraps the wait so a timeout (or any OCR failure) degrades to an empty
-title instead of aborting the run. It changes no musical output.
-
-Idempotent: safe to run twice. Check-only unless --apply is passed.
+Neither changes a single note: the title is the only thing these paths touch.
+Both patches are idempotent, keep a .orig backup, and are check-only unless
+--apply is passed.
 
     python scripts/patch_homr_title_timeout.py            # report
     python scripts/patch_homr_title_timeout.py --apply    # patch in place
@@ -29,58 +29,97 @@ import argparse
 import os
 import sys
 
-OLD = "        title = title_future.result(60)\n"
-NEW = """        try:
+HUNKS = [
+    (
+        "main.py",
+        "        title = title_future.result(60)\n",
+        """        try:
             title = title_future.result(60)
         except Exception:  # title OCR is cosmetic; never discard recognition
             title = ""     # for it (see scripts/patch_homr_title_timeout.py)
-"""
+""",
+    ),
+    (
+        "title_detection.py",
+        "    above_staff = image[y : y + height, x : x + width]\n",
+        """    if height <= 0 or width <= 0:
+        return ""  # no room above the staff; title detection is optional
+    above_staff = image[y : y + height, x : x + width]
+""",
+    ),
+    (
+        "title_detection.py",
+        "    return _executor.submit(_detect_title_task, debug, top_staff)\n",
+        """    # Disabled by ScoreHalo: the title feeds only MusicXML <work-title>, and
+    # this OCR path could hang in native code, time out, or crash on an empty
+    # region -- each time destroying a recognition that had already finished.
+    # The hang was NOT catchable by the .result(60) guard, because native
+    # onnxruntime code held the GIL, so Python could not even run its timeout.
+    f: Future[str] = Future()
+    f.set_result("")
+    return f
+""",
+    ),
+]
 
 
-def find_main():
+def homr_dir():
     try:
         import homr
     except ImportError:
         return None
-    return os.path.join(os.path.dirname(homr.__file__), "main.py")
+    return os.path.dirname(homr.__file__)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
-                    help="write the patch (default is report-only)")
+                    help="write the patches (default is report-only)")
     args = ap.parse_args(argv)
 
-    path = find_main()
-    if not path or not os.path.exists(path):
+    d = homr_dir()
+    if not d:
         print("  homr is not importable from this interpreter.")
         print("  Run with the ScoreHalo venv: .venv/bin/python "
               "scripts/patch_homr_title_timeout.py")
         return 1
 
-    src = open(path).read()
-    if NEW in src:
-        print(f"  already patched: {path}")
-        return 0
-    if OLD not in src:
-        print(f"  !! could not find the expected line in {path}.")
-        print("  homr has probably been upgraded; re-read main.py and adjust.")
-        return 1
+    todo = []
+    for fname, old, new in HUNKS:
+        path = os.path.join(d, fname)
+        if not os.path.exists(path):
+            print(f"  !! missing {path} -- skipping that hunk")
+            continue
+        src = open(path).read()
+        if new in src:
+            print(f"  already patched: {fname}")
+            continue
+        if old not in src:
+            print(f"  !! {fname} does not contain the expected line.")
+            print("     homr has probably been upgraded; re-read it and adjust.")
+            return 1
+        todo.append((path, old, new))
 
-    print(f"  target: {path}")
+    if not todo:
+        return 0
+
     if not args.apply:
-        print("  would wrap `title_future.result(60)` in try/except.")
+        for path, _, _ in todo:
+            print(f"  would patch: {path}")
         print("  re-run with --apply to do it.")
         return 0
 
-    backup = path + ".orig"
-    if not os.path.exists(backup):
-        with open(backup, "w") as f:
-            f.write(src)
-    with open(path, "w") as f:
-        f.write(src.replace(OLD, NEW, 1))
-    print(f"  patched. original saved to {backup}")
-    print("  restore with: mv " + backup + " " + path)
+    for path, old, new in todo:
+        src = open(path).read()
+        backup = path + ".orig"
+        if not os.path.exists(backup):
+            with open(backup, "w") as f:
+                f.write(src)
+        with open(path, "w") as f:
+            f.write(src.replace(old, new, 1))
+        print(f"  patched {path}  (original at {backup})")
+    print("  restore all with: for f in " +
+          " ".join(p + ".orig" for p, _, _ in todo) + "; do mv \"$f.orig\" \"$f\"; done")
     return 0
 
 

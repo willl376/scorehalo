@@ -76,9 +76,36 @@ Current result over the 16 converted pages: **167 staves, 3 outliers, zero
 phantoms.** All three outliers are benign — real staves carrying a ledger line
 or a faded line, not bracket edges or photo borders misread as staves.
 
-Recognising all 167 staves (≈75s each, 4 cores) is a ~1h run driven by
-`scripts/per_staff_all.py`; it appends to `per_staff.jsonl` as it goes and
-resumes where it left off. Corpus-wide note totals: *run in progress.*
+Recognising all 167 staves is driven by `scripts/per_staff_all.py`; it appends to
+`per_staff.jsonl` as it goes and resumes where it left off. Current result over
+the 16 converted pages: **166 of 167 staves recognised, 3,630 notes.** p0020
+contributes 118 notes across its 8 staves, against 120 from the whole page.
+
+### homr needs a patch before this works at scale
+
+`scripts/patch_homr_title_timeout.py` (check-only by default, `--apply` to
+write) fixes three ways homr's cosmetic title detection destroyed recognition
+that had already completed:
+
+- a hardcoded 60s timeout on the title future, awaited *after* recognition and
+  *before* the MusicXML is written;
+- a `cv2.imwrite` assertion on an empty "above the staff" region when homr's
+  detected top staff has `min_y == 0`;
+- a hang in native onnxruntime code inside RapidOCR that **held the GIL**, so
+  Python could not even run its own `.result(60)` timeout. Five staves hung
+  until our 900s watchdog killed them — ~75 minutes of wall time for metadata
+  we never use.
+
+The last one is why the third hunk simply **disables title detection** rather
+than trying to bound it. `<work-title>` is the only thing it feeds, and we
+join pages, so the feature is switched off instead of hardened. With it off, the
+five staves that had been hanging completed in 0.4 minutes total.
+
+The one remaining non-recognition is p0024 staff 3, where homr reports
+`Found 79 staff line fragments / Found 0 noteheads`. Its geometry matches the
+staves either side of it, so this is either a notehead-detection miss or a
+genuinely sparse staff — `data/out-perstaff/crops/p0024.s{2,3,4}.png` settles it
+by eye.
 
 ## Usage
 
