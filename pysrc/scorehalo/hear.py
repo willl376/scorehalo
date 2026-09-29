@@ -3,13 +3,31 @@
 Purpose: let a human judge a transcription by ear, and let pitch analysis of
 the real recording be diffed against what we produced (see `analyze`).
 
+Listening is the fastest error-finder we have: a wrong note or a dropped beat
+is obvious in four seconds of audio and invisible in a wall of MusicXML. It is
+also the thing a non-musician actually wants out of an OMR tool, so it belongs
+in the product, not just in a notebook.
+
 Chain:
-  .musicxml  -o .mid   via MuseScore (headless, retried, fresh output path)
+  .musicxml  -o .mid   via an ENGRAVER (see ENGRAVERS below)
   .mid       -> .wav    via fluidsynth + a General MIDI soundfont
   .wav       -> audio   via pw-play (PipeWire), so it follows the real default sink
+
+ENGRAVERS, in order of preference
+  musescore  MuseScore headless. The most faithful importer we have.
+  lilypond   musicxml2ly + `lilypond`. Free, scriptable, and *second*
+             opinion: a file MuseScore imports silently can still be broken
+             (see the measure-arithmetic and slur defects), and LilyPond
+             complains out loud. LilyPond is a hard dependency anyway -- the
+             `emit` path already uses it -- so this fallback costs nothing.
+
+  `--engraver` forces one. Default is `auto`: try MuseScore, fall back to
+  LilyPond. The fallback is the point; a missing MuseScore must not mean a
+  user cannot hear their own transcription.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,8 +36,24 @@ import tempfile
 MS_KEY = "MSCORE_BIN"
 
 
-def find_musescore(explicit=None):
-    """Locate the MuseScore binary: explicit, $MSCORE_BIN, PATH, or known opt dirs."""
+def find_musescore(explicit=None, strict=False):
+    """Locate the MuseScore binary: explicit, $MSCORE_BIN, PATH, or known opt dirs.
+
+    An `explicit` path that does not exist is never silently replaced by a
+    different binary on PATH -- if someone types `--musescore /wrong/path` they
+    mean it, and quietly using another engraver produces output they did not
+    ask for with no warning. (Found this while testing --engraver.) By default
+    we report that and return None, so `auto` can fall back to LilyPond;
+    `strict=True` makes it fatal, which is right when MuseScore was demanded.
+    """
+    if explicit:
+        if os.path.exists(explicit) and os.access(explicit, os.X_OK):
+            return explicit
+        msg = f"the MuseScore path given does not exist or is not runnable: {explicit}"
+        if strict:
+            raise SystemExit(msg)
+        print(f"hear: {msg}", file=sys.stderr)
+        return None
     for cand in (
         explicit,
         os.environ.get(MS_KEY),
@@ -45,36 +79,125 @@ def find_soundfont(explicit=None):
     return None
 
 
-def musicxml_to_midi(mxl_path, out_mid, musescore_bin=None, attempts=3):
-    """Convert MusicXML/MXL to MIDI via headless MuseScore.
+def musicxml_to_midi_lilypond(mxl_path, out_mid, timeout=300):
+    """Convert MusicXML to MIDI with musicxml2ly + LilyPond. No GUI involved.
 
-    Mirrors compare.render_score_musescore: a stale/identical output path can
-    make MuseScore fail spuriously, so a fresh path is required and we retry.
+    Two traps, both learned the hard way, both of which produce a *successful*
+    run with no output rather than an error:
+
+    1. musicxml2ly writes the `\\midi` block COMMENTED OUT, and LilyPond only
+       writes a .midi when that block is live. Un-comment it with a
+       line-anchored regex -- matching a literal like `%  \\midi {\\tempo 4 = 100 }`
+       silently matches nothing once the converter's spacing shifts, and you
+       get no MIDI and no complaint.
+    2. The block must stay INSIDE the `\\score`. A `\\midi{}` at the top level is
+       accepted and ignored. So: edit in place, never append at the end.
     """
-    bin_ = find_musescore(musescore_bin)
-    if not bin_:
-        raise SystemExit(
-            "MuseScore binary not found; pass --musescore, set $MSCORE_BIN, "
-            "or install MuseScore"
+    for tool in ("musicxml2ly", "lilypond"):
+        if not shutil.which(tool):
+            raise SystemExit(
+                f"{tool} not found on PATH; install lilypond (which ships musicxml2ly)"
+            )
+    out_mid = os.path.abspath(out_mid)
+    work = tempfile.mkdtemp(prefix="scorehalo-ly-")
+    base = os.path.splitext(os.path.basename(mxl_path))[0]
+    ly = os.path.join(work, base + ".ly")
+    mid = os.path.join(work, base + ".midi")
+    try:
+        r = subprocess.run(
+            ["musicxml2ly", "-o", ly, os.path.abspath(mxl_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
+        if r.returncode != 0 or not os.path.exists(ly):
+            # musicxml2ly is a Python script and CRASHES (uncaught TypeError in
+            # group_tuplets) on homr's damaged tuplet data rather than exiting
+            # cleanly. Surface the actual exception, not just the rc.
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            raise SystemExit(
+                "musicxml2ly failed on this score (its own converter, not our bug):\n  "
+                + "\n  ".join(tail[-4:])
+            )
+
+        with open(ly) as fh:
+            src = fh.read()
+        uncommented, n = re.subn(r"(?m)^([ \t]*)%[ \t]*(\\midi\b.*)$", r"\1\2", src)
+        if n == 0 and not re.search(r"\\midi\b", uncommented):
+            raise SystemExit(
+                "no \\midi block in the converted score; cannot emit MIDI"
+            )
+        with open(ly, "w") as fh:
+            fh.write(uncommented)
+
+        subprocess.run(
+            ["lilypond", "-o", os.path.join(work, base), ly],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if not os.path.exists(mid):
+            raise SystemExit("lilypond produced no MIDI (see its warnings above)")
+        shutil.move(mid, out_mid)
+        return out_mid
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def musicxml_to_midi(mxl_path, out_mid, musescore_bin=None, attempts=3,
+                     engraver="auto"):
+    """Convert MusicXML/MXL to MIDI using the best available engraver.
+
+    `auto` prefers MuseScore and falls back to LilyPond. The fallback matters:
+    MuseScore here is a 146MB portable app that has already cost us one silent
+    rc=40 import-dialog hang, and it can wedge headless mode indefinitely.
+    """
+    out_mid = os.path.abspath(out_mid)
+    if engraver == "lilypond":
+        return musicxml_to_midi_lilypond(mxl_path, out_mid)
+
+    # strict only when MuseScore was explicitly demanded: in `auto` a bad path
+    # should degrade to LilyPond rather than abort the whole audition.
+    bin_ = find_musescore(musescore_bin, strict=(engraver == "musescore"))
+    if not bin_:
+        if engraver == "musescore":
+            raise SystemExit(
+                "MuseScore binary not found; pass --musescore, set $MSCORE_BIN, "
+                "or use --engraver lilypond"
+            )
+        return musicxml_to_midi_lilypond(mxl_path, out_mid)
+
     env = dict(os.environ)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    out_mid = os.path.abspath(out_mid)
     if os.path.exists(out_mid):
         os.remove(out_mid)
     last = ""
     for _ in range(attempts):
-        r = subprocess.run(
-            [bin_, "-o", out_mid, os.path.abspath(mxl_path)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
+        try:
+            r = subprocess.run(
+                [bin_, "-o", out_mid, os.path.abspath(mxl_path)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # MuseScore can hang headless forever; that is exactly why the
+            # LilyPond fallback exists, so stop retrying and take it.
+            last = "timed out after 300s (headless MuseScore hang)"
+            break
         if os.path.exists(out_mid):
             return out_mid
         last = f"rc={r.returncode}: {(r.stderr or '')[-200:]}"
-    raise SystemExit(f"MuseScore MIDI export failed after {attempts} attempts ({last})")
+    if engraver == "musescore":
+        raise SystemExit(f"MuseScore MIDI export failed after {attempts} attempts ({last})")
+    print(
+        f"hear: MuseScore could not render this ({last});\n"
+        f"      trying LilyPond instead -- a failure there means the SCORE is "
+        f"damaged, not that the tool is missing.",
+        file=sys.stderr,
+    )
+    return musicxml_to_midi_lilypond(mxl_path, out_mid)
 
 
 def midi_to_wav(mid_path, out_wav, soundfont=None, sample_rate=44100):
@@ -153,12 +276,15 @@ def audition(
     keep=False,
     play_it=True,
     quiet=False,
+    engraver="auto",
 ):
     """MusicXML -> MIDI -> WAV, optionally play it. Returns (mid, wav)."""
     tmp = work_dir or tempfile.mkdtemp(prefix="scorehalo-hear-")
     os.makedirs(tmp, exist_ok=True)
     base = os.path.splitext(os.path.basename(mxl_path))[0]
-    mid = musicxml_to_midi(mxl_path, os.path.join(tmp, base + ".mid"), musescore_bin)
+    mid = musicxml_to_midi(
+        mxl_path, os.path.join(tmp, base + ".mid"), musescore_bin, engraver=engraver
+    )
     wav = midi_to_wav(mid, os.path.join(tmp, base + ".wav"), soundfont)
     if not quiet:
         dur = os.path.getsize(wav) / (44100 * 2 * 2)  # 16-bit stereo
@@ -188,6 +314,12 @@ def main(argv=None):
     ap.add_argument("--no-play", action="store_true", help="render only, do not play")
     ap.add_argument("--keep", action="store_true", help="keep temp dir")
     ap.add_argument("--out", help="directory for the .mid/.wav (default: temp)")
+    ap.add_argument(
+        "--engraver",
+        choices=("auto", "musescore", "lilypond"),
+        default="auto",
+        help="which importer to use (default: auto = MuseScore, else LilyPond)",
+    )
     args = ap.parse_args(argv)
     if not os.path.exists(args.score):
         raise SystemExit(f"no such score: {args.score}")
@@ -199,6 +331,7 @@ def main(argv=None):
         player=args.player,
         keep=args.keep,
         play_it=not args.no_play,
+        engraver=args.engraver,
     )
     return 0
 

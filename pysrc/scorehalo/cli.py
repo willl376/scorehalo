@@ -9,7 +9,7 @@ import glob
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scorehalo import __version__, pdf, engine, validate, preprocess
+from scorehalo import __version__, pdf, engine, validate, preprocess, repair
 
 
 def parse_pages(spec, count):
@@ -90,9 +90,12 @@ def cmd_convert(args):
 
         out_xml = os.path.join(out_dir, f"p{n:04d}.musicxml")
         shutil.move(xml_path, out_xml)
+        tuplets = repair.repair_time_modifications(out_xml)
         ok, rep = validate.validate(out_xml)
-        entry.update({"status": "ok" if ok else "validate-warn", "validation": rep, "output": out_xml})
+        entry.update({"status": "ok" if ok else "validate-warn", "validation": rep,
+                      "output": out_xml, "tuplets_repaired": tuplets})
         print(f"[p{n}] OK: {rep.get('parts')} part(s), {rep.get('measures')} measure(s), {rep.get('notes')} notes"
+              + (f", {tuplets} tuplet(s) typed" if tuplets else "")
               + ("" if ok else f" WARN: {rep.get('errors')}"))
         if not ok:
             entry["status"] = "validate-warn"
@@ -110,7 +113,18 @@ def cmd_convert(args):
         try:
             _do_join(args.out)
         except Exception as e:
-            print(f"join skipped: {e}")
+            # Do not fail quietly here. The joiner merges per-STAFF
+            # fragments, so it loses everything that lives between staves and
+            # its output is rejected by LilyPond's musicxml2ly on real pages
+            # (TypeError in group_tuplets). The supported path is the
+            # system-level graph: scripts/per_system_all.py then
+            # scripts/build_page_graph.py.
+            print(f"\njoin: FAILED ({type(e).__name__}: {e})")
+            print("join is DEPRECATED -- it merges per-staff fragments and its "
+                  "output does not survive musicxml2ly. Use the system-level "
+                  "path instead:  scripts/per_system_all.py <data> --out "
+                  "data/out-system  &&  scripts/build_page_graph.py "
+                  "data/out-system --stem all --report")
     return 0
 
 
@@ -198,6 +212,7 @@ def cmd_hear(args):
         player=args.player,
         keep=args.keep,
         play_it=not args.no_play,
+        engraver=args.engraver,
     )
     return 0
 
@@ -281,6 +296,12 @@ def main(argv=None):
     hear.add_argument("--no-play", action="store_true", help="render only, no playback")
     hear.add_argument("--keep", action="store_true", help="keep the temp dir")
     hear.add_argument("--out", help="directory for the .mid/.wav (default: temp)")
+    hear.add_argument(
+        "--engraver",
+        choices=("auto", "musescore", "lilypond"),
+        default="auto",
+        help="importer for the MIDI step: auto = MuseScore, fall back to LilyPond",
+    )
     hear.set_defaults(fn=cmd_hear)
 
     pt = sub.add_parser(
@@ -299,6 +320,12 @@ def main(argv=None):
     srv.add_argument("out_dir", nargs="?", default="scorehalo-out")
     srv.add_argument("--port", type=int, default=8001)
     srv.set_defaults(fn=cmd_serve)
+
+    from scorehalo.toly_cmd import add_parser as add_toly
+    add_toly(sub)
+
+    from scorehalo.canon import add_parser as add_canon
+    add_canon(sub)
 
     ap.add_argument("--version", action="version", version=f"scorehalo {__version__}")
     args = ap.parse_args(argv)

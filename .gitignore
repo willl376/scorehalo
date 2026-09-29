@@ -3,3 +3,9 @@ data/
 __pycache__/
 *.pyc
 *.egg-info/
+# Third-party tutorial captions: verbatim auto-generated .vtt from a YouTube
+# playlist that is not our copyright. Kept locally as a working reference,
+# never published. Our own distilled notes in docs/lilypond-lessons.md ARE
+# tracked.
+docs/lilypond-lessons/vtt/
+docs/lylessons-transcripts.md
