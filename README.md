@@ -11,6 +11,10 @@ photographs or decorative graphics), ScoreHalo (1) restores and classifies the
 page, (2) skips or masks non-music content, and (3) hands the page to a
 warp-tolerant transformer engine (homr) that reads notation semantically.
 
+**New here?** Start with **[USER_GUIDE.md](USER_GUIDE.md)** — step-by-step
+install, single pages, whole books, and an honest account of what the output
+is and is not. This README is the design and measurement record.
+
 ## Pipeline
 
 ```
