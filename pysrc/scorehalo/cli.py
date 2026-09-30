@@ -210,19 +210,44 @@ def _pdf_page_size_pts(src):
         return (None, None)
 
 
-def _do_join(out_dir):
+def _do_join(out_dir, allow_partial=False):
     from scorehalo import join
-    out_dir = os.path.abspath(out_dir)
+    out_dir = resolve_path(out_dir)
     man_path = os.path.join(out_dir, "manifest.json")
     if not os.path.exists(man_path):
         print("no manifest.json; run convert first")
         return None
     with open(man_path) as fh:
         manifest = json.load(fh)
-    xmls = [p["output"] for p in manifest["pages"] if p.get("status") == "ok" and p.get("output")]
+    candidates = [p for p in manifest["pages"] if p.get("output")]
+    good = [p for p in candidates if p.get("status") == "ok"]
+    dropped = [p for p in candidates if p.get("status") != "ok"]
+
+    # Never silently emit a partial score. A page can fail validation for a
+    # cosmetic reason (an unbalanced slur) and dropping it can discard most of
+    # the book -- so refuse, and say exactly what would be lost.
+    if dropped and not allow_partial:
+        lost = sum(p.get("validation", {}).get("notes", 0) or 0 for p in dropped)
+        kept = sum(p.get("validation", {}).get("notes", 0) or 0 for p in good)
+        print(f"refusing to join: {len(dropped)} of {len(candidates)} pages did "
+              f"not validate, which would silently drop {lost} notes "
+              f"(keeping only {kept})", file=sys.stderr)
+        for p in dropped:
+            errs = p.get("validation", {}).get("errors") or ["(no detail)"]
+            print(f"  p{p['page']:04d}: {'; '.join(errs)}", file=sys.stderr)
+        print("  fix the pages, or re-run with --allow-partial to join the "
+              "valid ones anyway", file=sys.stderr)
+        return None
+
+    xmls = [p["output"] for p in good]
     if not xmls:
         print("no successfully transcribed pages to join")
         return None
+    if dropped:
+        lost = sum(p.get("validation", {}).get("notes", 0) or 0 for p in dropped)
+        print(f"WARNING: joining {len(xmls)} of {len(candidates)} pages; "
+              f"{lost} notes from {len(dropped)} page(s) are NOT in the output",
+              file=sys.stderr)
     out_xml = os.path.join(out_dir, "score.musicxml")
     out_mxl = os.path.join(out_dir, "score.mxl")
     join.join_pages(xmls, out_xml, out_mxl)
@@ -231,7 +256,7 @@ def _do_join(out_dir):
 
 
 def cmd_join(args):
-    return 0 if _do_join(args.out_dir) else 1
+    return 0 if _do_join(args.out_dir, getattr(args, "allow_partial", False)) else 1
 
 
 def cmd_validate(args):
@@ -329,6 +354,9 @@ def main(argv=None):
 
     join_cmd = sub.add_parser("join", help="assemble per-page MusicXML into one score + .mxl")
     join_cmd.add_argument("out_dir")
+    join_cmd.add_argument("--allow-partial", action="store_true",
+                          help="join only the pages that validated, even if "
+                               "that silently omits notes (warns loudly)")
     join_cmd.set_defaults(fn=cmd_join)
 
     from scorehalo.compare import cmd_compare
