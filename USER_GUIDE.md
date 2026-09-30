@@ -48,12 +48,16 @@ destroying the music around them.
 ## 3. Requirements
 
 - **Python 3.12 or newer.** Check with `python3 --version`.
-- **About 2 GB of free disk** for the OMR model (downloaded on first run) and
-  page images.
+- **About 1 GB of free disk** — the virtual environment is roughly 650 MB once
+  installed, plus room for page images.
 - **MuseScore 4** — only if you want to render results to PDF, or play them
   back. Not needed to produce MusicXML.
 - **No GPU.** It runs on CPU. Expect roughly **1–3 minutes per page** on a
   modern laptop; more on older or slower machines.
+
+The OMR model does **not** need a separate download. About 150 MB of ONNX
+weights (a transformer encoder and decoder plus a staff-segmentation network)
+are bundled inside the `homr` package and arrive with `pip install`.
 
 Everything installs into a Python virtual environment, so nothing touches your
 system Python.
@@ -72,8 +76,9 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ./pysrc
 ```
 
-The first run downloads the OMR model, so expect a pause. After that, activate
-the environment in each new terminal:
+That installs ScoreHalo and the bundled OMR model — allow a few minutes while
+it downloads Python packages. Nothing else is needed; there is no separate
+model download step.
 
 ```bash
 cd ~/scorehalo
@@ -291,9 +296,9 @@ the last line of defence.
 The environment is not active. Run `cd ~/scorehalo && source .venv/bin/activate`,
 or call `~/scorehalo/.venv/bin/scorehalo` by full path.
 
-**The first run pauses for a long time**
-It is downloading the OMR model (~2 GB). This happens once. Later runs start
-immediately.
+**The very first run takes noticeably longer**
+It is compiling Python bytecode and loading the ONNX model into memory. This
+happens once; later runs start immediately.
 
 **A page converts but produces no music**
 Check `manifest.json` for that page. If it was classified as a photograph or

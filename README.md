@@ -212,10 +212,11 @@ degradation, so this is the easy end of the range, not real-book accuracy.
 ## Notes
 
 - Backend: homr (AGPL-3.0), chosen because it is camera-photo/degredation
-  tolerant and runs on CPU. Models download on first run (`homr --init`).
-  ScoreHalo *invokes* homr as a separate process and does not vendor or link
-  it, so this repo is MIT-licensed. Keep it that way: adding homr's code or
-  weights here would pull the whole project into AGPL-3.0.
+  tolerant and runs on CPU. In homr 0.7.0 the ~150 MB of ONNX weights ship
+  inside the PyPI wheel itself, so there is no separate `homr --init` download
+  step. ScoreHalo *invokes* homr as a separate process and does not vendor or
+  link it, so this repo is MIT-licensed. Keep it that way: adding homr's code
+  or weights here would pull the whole project into AGPL-3.0.
 - homr neglects dynamics/articulation/double-sharps and some lyrics; treat
   output as a strong draft to proofread in MuseScore — same caveat as every OMR.
 - The joiner canonicalizes each page to one part (staff 1 vocal + staff 2
