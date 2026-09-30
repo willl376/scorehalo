@@ -530,6 +530,15 @@ def _voice_body(notes: Sequence[Note], measure: Measure, provenance: bool,
     i = 0
     while i < len(events):
         ev = events[i]
+        # NOTE: an earlier version of this loop carried a `duration <= 0 -> skip`
+        # guard, added on the theory that a zero-length event could stall the
+        # tuplet-run scan. Measured: it cannot. The outer `i` is advanced by
+        # every branch (i += 1 for the non-tuplet path, i = j where j >= i + 1
+        # for the run path), so the loop is bounded by len(events) either way,
+        # and the guard made no observable difference on any of the five cases
+        # A/B'd against it. Left out: a guard that does nothing is a false
+        # promise of safety. If a real zero-duration stall is ever observed,
+        # prove it with a timeout first.
         _gap(ev.onset)
         if ev.tuplet is None:
             out.append(_render_event(ev, divisions, provenance))

@@ -15,6 +15,12 @@ dependencies = [
     "pillow>=10",
 ]
 
+# Without this, `pip install` produces no `scorehalo` command and the README's
+# documented invocations (`scorehalo convert ...`) do not exist. The launcher
+# in ~/.local/bin was a hand-written wrapper hiding this.
+[project.scripts]
+scorehalo = "scorehalo.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "."}
 packages = ["scorehalo"]
