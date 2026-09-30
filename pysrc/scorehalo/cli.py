@@ -29,9 +29,76 @@ def parse_pages(spec, count):
     return sorted(out)
 
 
+def resolve_path(p):
+    """Absolute path for user-supplied input, with ~ expanded.
+
+    os.path.abspath() alone is WRONG here: a leading '~' is not absolute, so
+    abspath treats it as relative and joins it onto the current directory,
+    yielding '/home/someone/~/Documents/book.pdf'. It then fails with a
+    FileNotFoundError pointing at a path that never existed. expanduser
+    first, then abspath.
+    """
+    return os.path.abspath(os.path.expanduser(p))
+
+
+def suggest_path(path):
+    """Human-readable guesses when a file isn't found.
+
+    Two ways this goes wrong on Linux, both worth naming:
+      * wrong case on the FILE  ('carpenters X.pdf' vs 'Carpenters X.pdf')
+      * wrong case on the DIRECTORY, which is nastier because '~/documents'
+        and '~/Documents' can BOTH exist, so the typo still looks plausible.
+    """
+    raw = os.path.expanduser(path)
+    d, base = os.path.split(raw)
+    fold = lambda s: s.casefold()                      # noqa: E731
+    notes = []
+
+    # 1. right directory, wrong-case filename
+    if os.path.isdir(d):
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            entries = []
+        for h in [e for e in entries if fold(e) == fold(base)][:3]:
+            notes.append(f"  found instead: {os.path.join(d, h)}")
+        if notes:
+            return "\n".join(notes)
+
+    # 2. wrong-case directory, but ONLY when the file really is over there.
+    # Reporting a bare "case difference?" for a file that is simply absent is
+    # a false hint: on a machine where both ~/Documents and ~/documents
+    # exist, it fires on every missing file under the correct one.
+    parent = os.path.dirname(d.rstrip("/")) or "/"
+    try:
+        sibs = os.listdir(parent)
+    except OSError:
+        sibs = []
+    here = os.path.basename(d.rstrip("/"))
+    for s in sibs:
+        if fold(s) == fold(here) and s != here:
+            cand = os.path.join(parent, s, base)
+            if os.path.exists(cand):
+                notes.append(f"  found instead: {cand}")
+            break
+    return "\n".join(notes)
+
+
+def require_input_file(path):
+    """Return the resolved path, or exit with a message a human can act on."""
+    src = resolve_path(path)
+    if os.path.exists(src):
+        return src
+    print(f"scorehalo: no such file: {src}", file=sys.stderr)
+    hint = suggest_path(path)
+    if hint:
+        print(hint, file=sys.stderr)
+    raise SystemExit(2)
+
+
 def cmd_convert(args):
-    args.out = os.path.abspath(args.out)
-    src = os.path.abspath(args.input)
+    args.out = resolve_path(args.out)
+    src = require_input_file(args.input)
     if src.lower().endswith(".pdf"):
         total = pdf.page_count(src)
         pages = parse_pages(args.pages, total)
