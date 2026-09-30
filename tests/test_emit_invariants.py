@@ -11,12 +11,17 @@ Run: .venv/bin/python -m unittest discover -s tests -v
 
 import os
 import sys
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+
+import cv2
+import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pysrc"))
 
+from scorehalo import preprocess  # noqa: E402
 from scorehalo.emit import (GLOBAL_DIVISIONS, Note, emit_page,  # noqa: E402
                             parse_part)
 from scorehalo.graph import Measure, Page, Part, Pitch  # noqa: E402
@@ -443,6 +448,43 @@ class TestTupletRoundTrip(unittest.TestCase):
         self.assertEqual(check_every_note_typed(root), [])
         n = root.find(".//note")
         self.assertIsNotNone(n.find("type"))
+
+
+class TestEnhanceWritesFile(unittest.TestCase):
+    """--enhance was silently a no-op: the enhanced/ dir was never created and
+    cv2.imwrite returns False rather than raising, so convert went on to hand
+    homr a path that did not exist."""
+
+    def test_creates_missing_parent_and_writes_png(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "in.png")
+            dst = os.path.join(td, "does", "not", "exist", "out.png")
+            cv2.imwrite(src, np.full((40, 60, 3), 200, dtype=np.uint8))
+
+            returned = preprocess.enhance(src, dst)
+
+            self.assertEqual(returned, dst)
+            self.assertTrue(os.path.exists(dst), "enhance() returned a path it never wrote")
+            self.assertIsNotNone(cv2.imread(dst))
+
+    def test_raises_instead_of_silently_skipping_when_write_fails(self):
+        """Measured on OpenCV 5.0.0, imwrite has TWO distinct behaviours:
+        a missing parent directory and an unwritable directory both return
+        False with only a stderr WARN, while a bad extension raises cv2.error.
+        The silent-False cases are the dangerous ones, so enhance() must not
+        hand back a path it never wrote."""
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "in.png")
+            cv2.imwrite(src, np.full((20, 20, 3), 10, dtype=np.uint8))
+
+            ro = os.path.join(td, "readonly")
+            os.makedirs(ro)
+            os.chmod(ro, 0o500)
+            try:
+                with self.assertRaises(OSError):
+                    preprocess.enhance(src, os.path.join(ro, "out.png"))
+            finally:
+                os.chmod(ro, 0o700)
 
 
 if __name__ == "__main__":

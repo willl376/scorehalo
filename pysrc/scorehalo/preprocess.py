@@ -19,6 +19,9 @@ def enhance(input_path, out_path, contrast=True, sharpen=True):
     img = cv2.imread(input_path, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"can't read {input_path}")
+    parent = os.path.dirname(out_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if contrast:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16))
@@ -26,7 +29,10 @@ def enhance(input_path, out_path, contrast=True, sharpen=True):
     if sharpen:
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         gray = cv2.addWeighted(gray, 1.35, blur, -0.35, 0)
-    cv2.imwrite(out_path, gray)
+    # imwrite is silent on failure for a missing/unwritable parent: it returns
+    # False with only a stderr WARN. Verified on OpenCV 5.0.0.
+    if not cv2.imwrite(out_path, gray):
+        raise OSError(f"cv2.imwrite failed for {out_path} (missing or unwritable parent dir)")
     return out_path
 
 
