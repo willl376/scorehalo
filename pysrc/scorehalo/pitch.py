@@ -1,35 +1,143 @@
-"""Monophonic pitch tracking from a recording: WAV -> note sequence.
+"""ScoreHalo pitch: live PyAudio capture + monophonic pitch tracking from a WAV.
 
-Purpose: Wilbur can hum or whistle a melody into a microphone; this turns that
-into a note sequence we can diff against what ScoreHalo transcribed. This is
-the only independent (non-image) ground truth available for the *melody* line.
+Purpose: Wilbur can hum or whistle a melody into a microphone; this records a
+clean WAV (crystal-clear 44.1 kHz / 16-bit / mono) and, when asked, turns the
+recording into a note sequence we can diff against what ScoreHalo transcribed.
+This is the only independent (non-image) ground truth available for the
+*melody* line.
 
-Method: NSDF (McLeod Pitch Method, 2002) for octave-robust f0, then median
+Recording (the replaced path): the previous `record_wav` shelled out to
+`pw-record` (PipeWire). The recording path is now a direct PyAudio capture with
+explicitly configured buffers — the same parameters that were validated as
+crystal-clear:
+
+    CHUNK   = 1024   frames per buffer
+    FORMAT  = paInt16 (16-bit, the rock-solid choice for pitch work)
+    CHANNELS= 1      mono
+    RATE    = 44100  CD quality
+
+Analysis: NSDF (McLeod Pitch Method, 2002) for octave-robust f0, then median
 filtering, semitone quantization, and run-length grouping into notes.
 
 Scope, honestly stated:
-  * MONOPHONIC only. Chords produce a blurry/garbled track; this cannot
+  * MONOPHONIC analysis only. Chords produce a blurry/garbled track; this cannot
     transcribe polyphony. Humming or whistling one line is the use case.
+  * Recording is a plain capture: it does not filter room noise. Use
+    `scripts/pitch_listener.py` for a live, noise-guarded readout.
   * Does not recover *missing* music: a staff homr never read is silent, and
     silence is indistinguishable from "nothing there" here. This verifies the
     notes that survived; it cannot restore the ones that did not.
 
-Run `python -m scorehalo.pitch --selftest` to verify on synthetic tones.
+Usage:
+    python -m scorehalo.pitch --help
+    python -m scorehalo.pitch                    # capture 5 s -> output_crystal.wav
+    python -m scorehalo.pitch out.wav            # capture to out.wav
+    python -m scorehalo.pitch --record out.wav --secs 8
+    python -m scorehalo.pitch exists.wav         # analyze an existing WAV
+    python -m scorehalo.pitch --list-devices
+    python -m scorehalo.pitch --selftest         # NSDF on synthetic tones + capture init
 """
 
 import argparse
 import os
-import subprocess
 import sys
 import wave
 
 import numpy as np
 
-# musical constants
+try:
+    import pyaudio
+except ImportError:  # pragma: no cover - environment check
+    pyaudio = None
+
+# musical constants (analysis)
 A4_MIDI = 69
 A4_HZ = 440.0
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
+# capture defaults (the validated crystal-clear configuration)
+DEFAULT_CHUNK = 1024
+DEFAULT_RATE = 44100
+DEFAULT_CHANNELS = 1
+DEFAULT_SECS = 5.0
+DEFAULT_OUTPUT = "output_crystal.wav"
+
+
+# ---------------------------------------------------------------------------
+# Capture (PyAudio) -- the replaced recording path
+# ---------------------------------------------------------------------------
+
+def _pa():
+    if pyaudio is None:
+        raise SystemExit(
+            "pyaudio is not installed. Run:  pip install pyaudio\n"
+            "(needs the portaudio19-dev system packages on Debian/Ubuntu)"
+        )
+    return pyaudio
+
+
+def list_devices():
+    """Print every input device PyAudio can see. Returns the list."""
+    pa = _pa()
+    p = pa.PyAudio()
+    try:
+        n = p.get_device_count()
+        for i in range(n):
+            info = p.get_device_info_by_index(i)
+            inch = int(info.get("maxInputChannels", 0))
+            if inch == 0:
+                continue
+            print(f"  [{i}] {info['name']}  ({inch} in, sr {info['defaultSampleRate']:.0f})")
+        if n == 0:
+            print("  (no devices reported)")
+        return [p.get_device_info_by_index(i) for i in range(n)]
+    finally:
+        p.terminate()
+
+
+def record_wav(path, secs=DEFAULT_SECS, rate=DEFAULT_RATE, channels=DEFAULT_CHANNELS,
+               chunk=DEFAULT_CHUNK, fmt=None, device=None):
+    """Record `secs` seconds of mono audio to a WAV via PyAudio.
+
+    Parameters mirror the validated crystal-clear configuration: 16-bit mono at
+    44.1 kHz read in 1024-frame buffers.  Returns the absolute output path.
+    """
+    pa = _pa()
+    if fmt is None:
+        fmt = pa.paInt16
+
+    p = pa.PyAudio()
+    try:
+        stream = p.open(format=fmt,
+                        channels=channels,
+                        rate=rate,
+                        input=True,
+                        frames_per_buffer=chunk,
+                        input_device_index=device)
+        try:
+            frames = []
+            n_buffers = int(rate / chunk * secs)
+            for _ in range(n_buffers):
+                data = stream.read(chunk, exception_on_overflow=False)
+                frames.append(data)
+        finally:
+            stream.stop_stream()
+            stream.close()
+    finally:
+        p.terminate()
+
+    path = os.path.abspath(path)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(p.get_sample_size(fmt))
+        wf.setframerate(rate)
+        wf.writeframes(b"".join(frames))
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Analysis (NSDF) -- preserved from the previous pitch.py
+# ---------------------------------------------------------------------------
 
 def load_wav_mono(path):
     """Read a WAV file -> (float32 mono samples in [-1,1], sample_rate)."""
@@ -170,32 +278,22 @@ def track(samples, sr, window=2048, hop=512, fmin=65.0, fmax=1400.0,
     return notes
 
 
-def record_wav(path, secs, target=None, rate=16000):
-    """Record from a PipeWire source with pw-record (bounded by timeout)."""
-    cmd = ["pw-record", "--rate", str(rate), "--channels", "1"]
-    if target:
-        cmd += ["--target", str(target)]
-    cmd.append(os.path.abspath(path))
-    if os.path.exists(path):
-        os.remove(path)
-    # no --duration flag on this pw-record; bound with timeout and SIGINT
-    try:
-        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            p.wait(timeout=secs)
-        except subprocess.TimeoutExpired:
-            p.terminate()
-            try:
-                p.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                p.kill()
-    except FileNotFoundError:
-        raise SystemExit("pw-record not found (install pipewire-utils)")
-    return path if os.path.exists(path) else None
+def analyze_wav(path, fmin=65.0, fmax=1400.0):
+    samples, sr = load_wav_mono(path)
+    notes = track(samples, sr, fmin=fmin, fmax=fmax)
+    dur = len(samples) / sr
+    print(f"analyzed {dur:.1f}s @ {sr}Hz -> {len(notes)} notes (monophonic) from {os.path.abspath(path)}")
+    for n in notes:
+        print(f"  {n['start']:6.2f}s  {n['dur']:5.2f}s  {n['name']:>4} (midi {n['midi']}, {n['hz']:.1f} Hz)")
+    return 0
 
 
-def _selftest():
-    """Verify pitch tracking on synthetic tones we generate ourselves."""
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+def _analyzer_selftest():
+    """Verify NSDF pitch tracking on synthetic tones we generate ourselves."""
     sr = 16000
     seq = [69, 71, 72, 74, 76]  # A4 B4 C5 D5 E5
     tone_len, gap = 0.30, 0.10
@@ -212,7 +310,7 @@ def _selftest():
     print(f"sent:     {seq}  ({[midi_to_name(m) for m in seq]})")
     print(f"recovered:{got}  ({[midi_to_name(m) for m in got]})")
     print(f"durations: {[n['dur'] for n in notes]}")
-    print("SELFTEST:", "PASS" if ok else "FAIL")
+    print("NSDF SELFTEST:", "PASS" if ok else "FAIL")
     if not ok:
         raise SystemExit(1)
     # a rest must not invent notes
@@ -222,39 +320,85 @@ def _selftest():
     return 0
 
 
+def _capture_selftest():
+    """Verify the PyAudio capture path can open/close a 44100/16/mono input stream.
+
+    On a headless box there is no default input device; that is an environment
+    limitation, reported as WARN, not a code failure.
+    """
+    pa = _pa()
+    p = pa.PyAudio()
+    try:
+        info = p.get_default_input_device_info()
+    except Exception:  # noqa: BLE001 - OSError/IOError depending on pyaudio version
+        print("CAPTURE SELFTEST: WARN (no default input device on this box)")
+        return 0
+    try:
+        stream = p.open(format=pa.paInt16, channels=1, rate=44100,
+                        input=True, frames_per_buffer=1024,
+                        input_device_index=info["index"])
+        stream.stop_stream()
+        stream.close()
+        print(f"CAPTURE SELFTEST: PASS (default input '{info['name']}')")
+        return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"CAPTURE SELFTEST: FAIL ({e})")
+        return 1
+
+
+def _selftest():
+    rc = _analyzer_selftest()
+    return rc | _capture_selftest()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="scorehalo.pitch", description="monophonic pitch tracking (hum/whistle -> notes)"
+        prog="scorehalo.pitch",
+        description="live PyAudio capture -> WAV, and/or monophonic pitch tracking (NSDF)",
     )
-    ap.add_argument("wav", nargs="?", help="WAV to analyze (or use --record)")
-    ap.add_argument("--record", action="store_true", help="record from mic first")
-    ap.add_argument("--secs", type=float, default=8.0, help="recording seconds")
-    ap.add_argument("--target", help="PipeWire source id (default: system default)")
-    ap.add_argument("--fmin", type=float, default=65.0)
-    ap.add_argument("--fmax", type=float, default=1400.0)
-    ap.add_argument("--selftest", action="store_true", help="verify on synthetic tones")
+    ap.add_argument("wav", nargs="?", default=None,
+                    help="output WAV (missing/absent -> capture; existing -> analyze)")
+    ap.add_argument("--record", action="store_true",
+                    help="capture from the microphone (default when the target does not exist)")
+    ap.add_argument("--secs", type=float, default=DEFAULT_SECS, help="capture seconds")
+    ap.add_argument("--rate", type=int, default=DEFAULT_RATE, help="capture sample rate")
+    ap.add_argument("--channels", type=int, default=DEFAULT_CHANNELS, help="capture channels")
+    ap.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="frames per buffer")
+    ap.add_argument("--device", type=int, default=None, help="PyAudio input device index")
+    ap.add_argument("--target", default=None,
+                    help="deprecated alias of --device (previous pw-record source id)")
+    ap.add_argument("--list-devices", action="store_true", help="list input devices and exit")
+    ap.add_argument("--fmin", type=float, default=65.0, help="analysis floor (Hz)")
+    ap.add_argument("--fmax", type=float, default=1400.0, help="analysis ceiling (Hz)")
+    ap.add_argument("--selftest", action="store_true", help="self-test NSDF + capture init")
     args = ap.parse_args(argv)
 
     if args.selftest:
         return _selftest()
 
-    path = args.wav
-    if args.record:
-        if not path:
-            path = "/tmp/scorehalo-pitch.wav"
-        got = record_wav(path, args.secs, args.target)
-        if not got:
-            raise SystemExit("recording failed (no data captured)")
-        print(f"recorded {args.secs}s -> {got}")
-    if not path:
-        ap.error("give a WAV or use --record")
-    samples, sr = load_wav_mono(path)
-    notes = track(samples, sr, fmin=args.fmin, fmax=args.fmax)
-    dur = len(samples) / sr
-    print(f"analyzed {dur:.1f}s @ {sr}Hz -> {len(notes)} notes (monophonic)")
-    for n in notes:
-        print(f"  {n['start']:6.2f}s  {n['dur']:5.2f}s  {n['name']:>4} (midi {n['midi']}, {n['hz']:.1f} Hz)")
-    return 0
+    if args.list_devices:
+        list_devices()
+        return 0
+
+    # --target from the old pw-record era -> device index when numeric
+    if args.target is not None and args.device is None:
+        try:
+            args.device = int(args.target)
+        except ValueError:
+            print(f"note: --target '{args.target}' is not an index; using the default input",
+                  file=sys.stderr)
+
+    path = args.wav or DEFAULT_OUTPUT
+    if args.record or not os.path.exists(path):
+        got = record_wav(path, secs=args.secs, rate=args.rate, channels=args.channels,
+                         chunk=args.chunk, device=args.device)
+        print(f"recorded {args.secs}s @ {args.rate}Hz -> {got}")
+        return 0
+    return analyze_wav(path, fmin=args.fmin, fmax=args.fmax)
 
 
 if __name__ == "__main__":
