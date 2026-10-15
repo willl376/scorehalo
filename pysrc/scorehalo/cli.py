@@ -313,18 +313,39 @@ def cmd_pitch(args):
     from scorehalo.pitch import main as pitch_main
 
     argv = []
-    if args.wav:
+    if getattr(args, "wav", None):
         argv.append(args.wav)
-    if args.record:
+    if getattr(args, "record", False):
         argv.append("--record")
-    argv += ["--secs", str(args.secs)]
-    if args.target:
-        argv += ["--target", args.target]
-    if args.fmin:
+    if getattr(args, "secs", None) is not None:
+        argv += ["--secs", str(args.secs)]
+    if getattr(args, "rate", None) is not None:
+        argv += ["--rate", str(args.rate)]
+    if getattr(args, "channels", None) is not None:
+        argv += ["--channels", str(args.channels)]
+    if getattr(args, "chunk", None) is not None:
+        argv += ["--chunk", str(args.chunk)]
+    if getattr(args, "device", None) is not None:
+        argv += ["--device", str(args.device)]
+    elif getattr(args, "target", None):
+        argv += ["--target", str(args.target)]
+    if getattr(args, "meter", False):
+        argv.append("--meter")
+    if getattr(args, "list_devices", False):
+        argv.append("--list-devices")
+    if getattr(args, "fmin", None) is not None:
         argv += ["--fmin", str(args.fmin)]
-    if args.fmax:
+    if getattr(args, "fmax", None) is not None:
         argv += ["--fmax", str(args.fmax)]
-    if args.selftest:
+    if getattr(args, "silence_rms", None) is not None:
+        argv += ["--silence-rms", str(args.silence_rms)]
+    if getattr(args, "json", False):
+        argv.append("--json")
+    if getattr(args, "against", None):
+        argv += ["--against", args.against]
+    if getattr(args, "staff", None):
+        argv += ["--staff", str(args.staff)]
+    if getattr(args, "selftest", False):
         argv.append("--selftest")
     return pitch_main(argv)
 
@@ -402,13 +423,23 @@ def main(argv=None):
     pt = sub.add_parser(
         "pitch", help="monophonic pitch tracking: hum/whistle a melody -> note sequence"
     )
-    pt.add_argument("wav", nargs="?", help="WAV to analyze (or use --record)")
-    pt.add_argument("--record", action="store_true", help="record from the mic first")
-    pt.add_argument("--secs", type=float, default=8.0, help="recording seconds")
-    pt.add_argument("--target", help="PipeWire source id (default: system default)")
-    pt.add_argument("--fmin", type=float, help="lowest detectable Hz (default 65)")
-    pt.add_argument("--fmax", type=float, help="highest detectable Hz (default 1400)")
-    pt.add_argument("--selftest", action="store_true", help="verify on synthetic tones")
+    pt.add_argument("wav", nargs="?", help="output WAV (missing -> capture; exists -> analyze)")
+    pt.add_argument("--record", action="store_true", help="capture from the microphone")
+    pt.add_argument("--secs", type=float, default=5.0, help="capture seconds")
+    pt.add_argument("--rate", type=int, default=44100, help="capture sample rate")
+    pt.add_argument("--channels", type=int, default=1, help="capture channels")
+    pt.add_argument("--chunk", type=int, default=1024, help="frames per buffer")
+    pt.add_argument("--device", type=int, default=None, help="PyAudio input device index")
+    pt.add_argument("--meter", action="store_true", help="show live level meter")
+    pt.add_argument("--target", default=None, help="deprecated alias of --device")
+    pt.add_argument("--list-devices", action="store_true", help="list input devices and exit")
+    pt.add_argument("--fmin", type=float, default=65.0, help="analysis floor (Hz)")
+    pt.add_argument("--fmax", type=float, default=1400.0, help="analysis ceiling (Hz)")
+    pt.add_argument("--silence-rms", type=float, default=None, help="silence gate (adaptive if omitted)")
+    pt.add_argument("--json", action="store_true", help="emit detected notes as JSON")
+    pt.add_argument("--against", default=None, help="MusicXML/.mxl score to diff against")
+    pt.add_argument("--staff", default=None, help="restrict score melody to one staff")
+    pt.add_argument("--selftest", action="store_true", help="self-test NSDF + capture init")
     pt.set_defaults(fn=cmd_pitch)
 
     srv = sub.add_parser("serve", help="start the review UI")
@@ -421,6 +452,9 @@ def main(argv=None):
 
     from scorehalo.canon import add_parser as add_canon
     add_canon(sub)
+
+    from scorehalo.review_cmd import add_parser as add_review
+    add_review(sub)
 
     ap.add_argument("--version", action="version", version=f"scorehalo {__version__}")
     args = ap.parse_args(argv)
