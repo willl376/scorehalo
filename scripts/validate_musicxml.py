@@ -91,6 +91,11 @@ def check(path, verbose=True):
                                 "(cursor before backup was %d)"
                                 % (where, cursor, prev_cursor))
                     elif el.tag == "forward":
+                        # <forward> is only valid in multi-voice measures --
+                        # it fills a later voice's gap up to the cursor while
+                        # <backup> rewinds for the layer above it. Well-formed
+                        # backup/forward pairs keep the end-of-bar cursor
+                        # honest, so no separate allowance is needed here.
                         cursor += d
                     else:
                         if el.find("chord") is None:

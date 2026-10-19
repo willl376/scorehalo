@@ -14,17 +14,26 @@ import numpy as np
 from PIL import Image
 
 
-def _as_array(img, thresh):
+def _as_array(img):
+    """Grayscale uint8 array from a path/file, PIL image, or ndarray.
+
+    The pipeline hands over whichever shape it already has. The ndarray case
+    used to fall through to ``img.convert("L")`` and die with AttributeError --
+    ndarrays have no ``.convert`` -- which made the commonest input shape the
+    one the function could not admit it had never seen.
+    """
     if isinstance(img, (str, bytes)) or hasattr(img, "read"):
-        a = np.asarray(Image.open(img).convert("L"))
-    else:
-        a = np.asarray(img.convert("L"))
-    return a
+        img = Image.open(img)
+    if isinstance(img, np.ndarray):
+        if img.ndim == 3:                     # colour -> one channel
+            return np.asarray(Image.fromarray(img).convert("L"))
+        return img                            # already grayscale
+    return np.asarray(img.convert("L"))
 
 
 def _row_line_score(img, thresh=200):
     """Per-row count of horizontal dark runs of length >= min_run."""
-    a = _as_array(img, thresh)
+    a = _as_array(img)
     dark = a < thresh
     h, w = dark.shape
     min_run = max(8, w // 90)
@@ -75,6 +84,7 @@ def count_staves(img, thresh=200, min_frac=0.004):
         if good < max(2, int(0.6 * gaps.size)):
             continue
         staves += max(1, round(len(lines) / 5))
+        # debug tuple: (first row, last row, line count, median gap px)
         kept.append((lines[0], lines[-1], len(lines), round(float(med), 1)))
 
     return staves, {"lines": int(cand.size), "groups": kept}
