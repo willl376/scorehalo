@@ -16,7 +16,9 @@ import shutil
 import subprocess
 import sys
 
-REPO = "/home/wburt59/scorehalo"
+#: repo root, derived from this file's location so the script runs from any
+#: checkout instead of one machine's home directory.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLED = os.path.join(REPO, ".venv/lib/python3.12/site-packages")
 TARGET = "/tmp/homr-instr"
 

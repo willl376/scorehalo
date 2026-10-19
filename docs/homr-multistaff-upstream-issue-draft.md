@@ -152,7 +152,7 @@ been the exact silent-success failure this project keeps hitting.
 - `get_xml_voice` N-capability re-verified: staff 3 → voices 9-12, staff 4 → 13-16.
 
 ### Deliberately NOT done
-- No local commit to `/home/wburt59/Downloads/homr-main` (not a git repo; and
+- No local commit to `~/Downloads/homr-main` (not a git repo; and
   the standing rule is not to commit there).
 - No PR opened — offered in the issue instead, warning-only first.
 - The audit repo `willl376/homr-audit` is PRIVATE, so it was **not** linked as

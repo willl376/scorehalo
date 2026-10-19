@@ -25,7 +25,8 @@ import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor
 
-ROOT = "/home/wburt59/scorehalo"
+#: repo root, derived from this file's location (portable across checkouts).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pysrc"))
 WORK = "/tmp/vz/bench"
 MS = os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable")
