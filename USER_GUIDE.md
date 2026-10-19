@@ -180,6 +180,10 @@ Joining pages from different songs treats unrelated music as one continuous
 composition and produces nonsense. A printed page may even belong to two
 different pieces, so check the page boundaries against the contents page.
 
+The deeper path the shipped six-song Carpenters deliverable actually used —
+per-staff recognition, page assembly, song stitching, strict validation — is
+documented in the README under **"From staves to songs"**.
+
 ### Resume after an interruption
 
 `convert` is crash-safe. It skips pages already recorded in `manifest.json`, so

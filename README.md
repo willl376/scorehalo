@@ -76,14 +76,17 @@ so `validate_layout.py` tests it without needing labels:
 python scripts/validate_layout.py data/out-band --json /tmp/val.json
 ```
 
-Current result over the 16 converted pages: **167 staves, 3 outliers, zero
-phantoms.** All three outliers are benign — real staves carrying a ledger line
+Result over the first 16-page run: **167 staves, 3 outliers, zero phantoms**
+(the layout-healing fix that followed lifted detection to 187 staves across the
+same pages). All three outliers are benign — real staves carrying a ledger line
 or a faded line, not bracket edges or photo borders misread as staves.
 
-Recognising all 167 staves is driven by `scripts/per_staff_all.py`; it appends to
-`per_staff.jsonl` as it goes and resumes where it left off. Current result over
-the 16 converted pages: **166 of 167 staves recognised, 3,630 notes.** p0020
-contributes 118 notes across its 8 staves, against 120 from the whole page.
+Recognition of every detected staff is driven by `scripts/per_staff_all.py`; it
+appends to `per_staff.jsonl` as it goes and resumes where it left off. Current
+result over the 16 converted pages: **186 of 187 staves recognised, 3,937
+notes** — the detected count rose from 167 staves when the layout-healing fix
+landed. p0020 contributes 118 notes across its 8 staves, against 120 from the
+whole page.
 
 ### homr needs a patch before this works at scale
 
@@ -110,6 +113,49 @@ The one remaining non-recognition is p0024 staff 3, where homr reports
 staves either side of it, so this is either a notehead-detection miss or a
 genuinely sparse staff — `data/out-perstaff/crops/p0024.s{2,3,4}.png` settles it
 by eye.
+
+## From staves to songs
+
+Recognition is per staff; a song is a page range. Three steps join the two ends
+— the path that produced the six-song Carpenters deliverable (pp. 20–36):
+
+1. **`scripts/per_staff_assemble.py`** (`build_page_graph.py` is the sibling
+   entry point with the same wiring) — one page: folds the homr fragments of
+   every staff into a two-part page graph (singer above piano, in the printed
+   systems' brace groups), reconciles meter across fragments, then emits
+   `PAGE-*.musicxml`.
+2. **`scripts/stitch_songs.py`** — a song: concatenates its pages into one
+   score. A part that sits a page out is padded with whole-measure rests that
+   inherit that page's *per-position* meters, so a bar lengthened for one part
+   stays lengthened for the tacet part too.
+3. **`scripts/validate_musicxml.py`** — the gate: per-measure cursor
+   arithmetic, `<staves>` vs `<staff>` references, meter and divisions
+   inheritance, attributes ordering. All six delivered songs: **zero
+   violations**, and all six import headlessly in MuseScore (`rc=0`).
+
+### The barline gives before the notes do
+
+homr occasionally writes a bar longer than its printed meter holds. The old
+emitter had only one recourse — drop every note whose onset lay past the
+barline and truncate the note crossing it — measured at **229 notes fully
+dropped (4.3%) + 89 truncated** across the 16 pages, the worst pages losing
+12–13% of their content.
+
+`scorehalo.meter.extend_overfull_bars` now lengthens the *barline* instead: the
+smallest meter that holds the bar's content (capped at 2× the page meter),
+applied to every part at that bar so the parts stay aligned — nothing moves,
+nothing is dropped. A bar past the cap is a misreading rather than music: it
+keeps the old drop and is *reported* at assembly time. Result: **192 → 19
+dropped, 88 → 11 truncated** (both confined to the two cap-exceeded bars),
+**+153 sounding notes** in the delivered songs, with every part count and bar
+count unchanged.
+
+One trap worth recording: lengthen a bar and a full-bar rest can inherit a
+nonstandard length (e.g. 120 ticks in a 5/4 bar). Writing that rest as an
+invented tuplet put `<time-modification>` on a rest, which MuseScore rejects
+outright (`rc=40`, with no message at all). Such rests now use the first-class
+`<rest measure="yes"/>` form, which carries no note value for an importer to
+second-guess.
 
 ## Usage
 
@@ -207,6 +253,10 @@ degradation, so this is the easy end of the range, not real-book accuracy.
 - `scripts/crop_probe.py`     system vs per-staff crop experiment (the 8-of-8 proof)
 - `scripts/per_staff_all.py`  parallel per-staff recognition over a whole run
 - `scripts/annotate_layout.py` overlay staves/systems on a page for eyeballing
+- `scripts/per_staff_assemble.py` + `scripts/build_page_graph.py`  fragments -> one assembled two-part PAGE
+- `scripts/stitch_songs.py`   a page range -> one song (cross-page rests inherit per-position meters)
+- `scripts/validate_musicxml.py`  strict gate: cursor arithmetic, `<staves>` vs `<staff>`, meter inheritance
+- `tests/`  **491 unit tests** — `.venv/bin/python -m pytest tests/ -q`
 - `data/out-test/` example output on "Carpenters Gold Songbook 1972" pages 20-22
 
 ## Notes
