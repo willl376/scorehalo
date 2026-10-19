@@ -32,40 +32,49 @@ from scorehalo.engine import run_homr  # noqa: E402
 from crop_probe import xml_stats  # noqa: E402
 
 
-def prep_pages(render_dir, manifest, out):
-    """Detect staves once per page; cache deskewed image + staff boxes."""
-    man = json.load(open(manifest))
-    pages = []
+def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None):
+    """Detect staves once per page; cache deskewed image + staff boxes.
+
+    ``pages`` restricts detection to the named stems (``{"p0022"}``); None
+    means every page in the manifest.  Restricting is what lets one page be
+    re-detected at a different threshold without touching the others.
+    """
+    with open(manifest) as fh:
+        man = json.load(fh)
+    pages_out = []
     for p in man["pages"]:
         if p.get("status") != "ok":
             continue
         name = os.path.splitext(os.path.basename(p["image"]))[0]
+        if pages is not None and name not in pages:
+            continue
         rp = os.path.join(render_dir, f"{name}.png")
         if not os.path.exists(rp):
             print(f"  !! missing render {rp} -- skipping")
             continue
         gray = np.array(Image.open(rp).convert("L"))
-        r = analyze_page(gray, min_staff_lines=5)
+        r = analyze_page(gray, min_staff_lines=min_staff_lines)
         dp = os.path.join(out, f"{name}.deskew.png")
         Image.fromarray(r["deskewed"]).save(dp)
         meta = {"page": name, "deskew": dp, "render": rp,
                 "n_staves": r["n_staves"], "n_systems": r["n_systems"],
-                "grouping": [len(s["staves"]) for s in r["systems"]],
+                "grouping": [s["n_staves"] for s in r["systems"]],
                 "staff_space": r["staff_space"],
                 "n_slivers_removed": r["n_slivers_removed"],
                 "staves": r["staves"]}
-        json.dump(meta, open(os.path.join(out, f"{name}.boxes.json"), "w"),
-                  indent=2)
-        pages.append(meta)
+        with open(os.path.join(out, f"{name}.boxes.json"), "w") as fh:
+            json.dump(meta, fh, indent=2)
+        pages_out.append(meta)
         print(f"  {name}: {r['n_staves']} staves, grouping "
               f"{'+'.join(map(str, meta['grouping']))}, "
               f"{r['n_slivers_removed']} slivers removed")
-    return pages
+    return pages_out
 
 
 def work(task):
     name, idx, out, pad, timeout = task
-    meta = json.load(open(os.path.join(out, f"{name}.boxes.json")))
+    with open(os.path.join(out, f"{name}.boxes.json")) as fh:
+        meta = json.load(fh)
     desk = np.array(Image.open(meta["deskew"]).convert("L"))
     st = meta["staves"][idx]
     h, w = desk.shape
@@ -110,7 +119,19 @@ def main(argv=None):
     ap.add_argument("-j", "--jobs", type=int, default=4)
     ap.add_argument("--pad-frac", type=float, default=0.12)
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--min-staff-lines", type=int, default=5,
+                    help="lines a candidate must have to count as a staff "
+                         "(lower to admit staves whose rules are interrupted)")
+    ap.add_argument("--pages", default="",
+                    help="comma-separated page numbers to restrict to "
+                         "(e.g. 22); empty means every page")
+    ap.add_argument("--force", action="store_true",
+                    help="re-run staves already present in the JSONL")
     args = ap.parse_args(argv)
+
+    only = None
+    if args.pages.strip():
+        only = {"p%04d" % int(x) for x in args.pages.split(",") if x.strip()}
 
     os.makedirs(args.out, exist_ok=True)
     render_dir = os.path.join(args.out_dir, "render")
@@ -118,7 +139,7 @@ def main(argv=None):
     jl = os.path.join(args.out, "per_staff.jsonl")
 
     done = set()
-    if os.path.exists(jl):
+    if os.path.exists(jl) and not args.force:
         for line in open(jl):
             try:
                 r = json.loads(line)
@@ -127,7 +148,8 @@ def main(argv=None):
                 pass
 
     print("== analysing pages (once) ==")
-    pages = prep_pages(render_dir, manifest, args.out)
+    pages = prep_pages(render_dir, manifest, args.out,
+                       min_staff_lines=args.min_staff_lines, pages=only)
     total = sum(p["n_staves"] for p in pages)
     tasks = [(p["page"], i, args.out, args.pad_frac, args.timeout)
              for p in pages for i in range(p["n_staves"])]

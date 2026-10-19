@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pysrc"))
 
 from scorehalo.emit import GLOBAL_DIVISIONS, emit_page, parse_part  # noqa: E402
 from scorehalo.graph import Measure, Page, Part  # noqa: E402
+from scorehalo.meter import (format_overrides, reconcile_meter,  # noqa: E402
+                             resolve_page_meter)
 
 
 def main():
@@ -86,19 +88,32 @@ def build_one(system_dir, stem, out):
                  sum(len(p.notes) for p in parts)))
 
     print("  meters seen: %s" % dict(meters))
-    if len(meters) > 1:
+    if meters:
         (b, bt), n = meters.most_common(1)[0]
-        print("  WARNING: systems disagree on meter; page takes %d/%d "
-              "(%d of %d measures). Change Page.beats/beat_type to override."
-              % (b, bt, n, sum(meters.values())))
+        if len(meters) > 1:
+            print("  WARNING: systems disagree on meter; page takes %d/%d "
+                  "(%d of %d measures). Change Page.beats/beat_type to override."
+                  % (b, bt, n, sum(meters.values())))
+        # Settled BEFORE assembly, because _concat_roles pads missing roles with
+        # invented bars and those bars must carry the page's meter rather than a
+        # fragment's. It used to be printed as a warning and then applied only
+        # to padding, so the singer's silent system-1 bars were published as
+        # 3/4 beside a piano playing 4/4.
         page.beats, page.beat_type = b, bt
-    else:
-        (page.beats, page.beat_type), _ = meters.most_common(1)[0]
 
     roles, order = _group_by_role(systems)
     _warn_if_role_sets_disagree(systems, order)
     page.parts = _concat_roles(order, roles, systems, page)
     _renumber(page.parts)
+
+    # Now that the parts exist, fix the real measures whose own content overruns
+    # the meter their fragment declared. This is where the four notes were being
+    # lost: system 1 declared 3/4, its bars were 36 ticks, and everything at or
+    # past tick 36 was dropped. See scorehalo.meter.
+    resolve_page_meter(page)
+    overrides = reconcile_meter(page)
+    if overrides:
+        print("  " + format_overrides(overrides).replace("\n", "\n  "))
 
     xml = emit_page(page)
     with open(out, "w", encoding="utf-8") as fh:
@@ -271,22 +286,58 @@ def _concat_roles(order, roles, systems, page):
     if template is None:
         template = Measure(number=1, divisions=GLOBAL_DIVISIONS)
 
+    # Clefs come straight from the fragments. This loop used to drop every
+    # one of them, so to_ly fell back to guessing each staff's clef from its
+    # pitch range and every staff on the page opened as treble -- including
+    # the singer's and the piano's bass staff. Staff numbers repeat per
+    # system, so a staff's vote is taken across every system the role
+    # appears in: the most common reading wins, letting one misread system
+    # lose to the two that read it right. Any disagreement is reported
+    # below rather than resolved in silence.
+    clef_votes = {}
+    for _sysno, parts in systems:
+        for p in parts:
+            for staff, clef in (p.clef_by_staff or {}).items():
+                clef_votes.setdefault((p.name, staff), []).append(clef)
+    clef_by_role, clef_conflicts = {}, []
+    for (name, staff), seen in clef_votes.items():
+        counts = {}
+        for clef in seen:
+            counts[clef] = counts.get(clef, 0) + 1
+        best = max(counts, key=lambda clef: counts[clef])
+        if len(counts) > 1:
+            clef_conflicts.append((name, staff, best, seen))
+        clef_by_role.setdefault(name, {})[staff] = best
+
     out = []
     for i, name in enumerate(order, start=1):
         part = Part(id="P%d" % i, name=name, system=1, staff_index=i)
+        part.clef_by_staff.update(clef_by_role.get(name, {}))
         by_system = {p.system: p for p in roles[name]}
         for sysno, _parts in systems:
             src = by_system.get(sysno)
             if src is not None:
                 part.measures.extend(src.measures)
             else:
+                # Padded silence takes the PAGE meter, not the template's.
+                # The template is whichever fragment measure came first with a
+                # key signature, and on p0020 that was system 1's misread 3/4 --
+                # so the singer's four silent bars were published as 3/4 while
+                # the piano beside them played 4/4. Padding is invented content;
+                # it has no opinion of its own and must not inherit a fragment's
+                # misreading.
                 for _ in range(sys_width[sysno]):
                     part.measures.append(Measure(
                         number=0, divisions=GLOBAL_DIVISIONS,
-                        beats=template.beats, beat_type=template.beat_type,
+                        beats=page.beats, beat_type=page.beat_type,
                         key_fifths=template.key_fifths, clef=template.clef,
                         is_empty=True))
         out.append(part)
+    for name, staff, chosen, seen in clef_conflicts:
+        print("  NOTE: %s staff %d -- systems disagree on the clef (%s); "
+              "kept %s." % (name, staff,
+                            ", ".join("%s%d" % c for c in seen),
+                            "%s%d" % chosen))
     return out
 
 

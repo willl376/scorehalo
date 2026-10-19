@@ -22,9 +22,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pysrc"))
 
 from scorehalo import preprocess  # noqa: E402
-from scorehalo.emit import (GLOBAL_DIVISIONS, Note, emit_page,  # noqa: E402
+from scorehalo.emit import (GLOBAL_DIVISIONS, Note, _TYPE, emit_page,  # noqa: E402
                             parse_part)
 from scorehalo.graph import Measure, Page, Part, Pitch  # noqa: E402
+from scorehalo.meter import reconcile_meter, resolve_page_meter  # noqa: E402
 
 SYSTEM_DIR = os.path.join(ROOT, "data", "out-system")
 STEM = "p0020"
@@ -157,6 +158,53 @@ def check_measures_fill(root):
     return problems
 
 
+def check_written_value_matches_duration(root):
+    """The written value of a note must equal the ticks it occupies.
+
+    ``<type>``/``<dot>`` and ``<time-modification>`` are what an importer reads
+    to decide how long a note IS; ``<duration>`` is what it plays. When the two
+    disagree the file is self-contradictory, and MuseScore resolves it the
+    engraver's way: it sums the NOMINAL values and reports the bar as short or
+    long. Rounding a 15-tick note up to a dotted quarter (18) made a full bar
+    read as 51/48 -- "Measure 1, staff 1 incomplete. Expected: 4/4; Found:
+    17/16" -- while every cursor-based check here and in validate_musicxml.py
+    stayed silent, because <duration> (which those checks sum) was correct.
+
+    This is the check that would have caught it.
+    """
+    from fractions import Fraction
+    problems = []
+    for p in root.findall("part"):
+        divisions = GLOBAL_DIVISIONS
+        for m in p.findall("measure"):
+            attrs = m.find("attributes")
+            if attrs is not None and attrs.findtext("divisions"):
+                divisions = int(attrs.findtext("divisions"))
+            for i, n in enumerate(m.findall("note"), start=1):
+                t = n.findtext("type")
+                if t is None:
+                    continue
+                dur = n.findtext("duration")
+                if dur is None:
+                    continue
+                dots = len(n.findall("dot"))
+                written = Fraction(_TYPE[t]) * divisions
+                written *= Fraction(2 ** (dots + 1) - 1, 2 ** dots)
+                tm = n.find("time-modification")
+                if tm is not None:
+                    a = int(tm.findtext("actual-notes") or 1)
+                    nn = int(tm.findtext("normal-notes") or 1)
+                    written *= Fraction(nn, a)
+                if written != int(dur):
+                    problems.append(
+                        "part %s measure %s note %d: %s with %d dot(s) "
+                        "under <time-modification> is %s ticks but "
+                        "<duration> is %s"
+                        % (p.get("id"), m.get("number"), i, t, dots,
+                           written, dur))
+    return problems
+
+
 def check_measures_numbered_sequentially(root):
     """Each part's measures must read 1..N with no gaps or repeats."""
     problems = []
@@ -200,8 +248,13 @@ def check_no_fabricated_parts(root, real_fragments):
 # Unit tests
 # --------------------------------------------------------------------------
 
-def _assemble_real_page(fragments=None):
-    """Assemble the real page exactly the way build_page_graph does."""
+def _assemble_real_page(fragments=None, reconcile=True):
+    """Assemble the real page exactly the way build_page_graph does.
+
+    ``reconcile=False`` returns the page *before* scorehalo.meter runs, which is
+    how tests/test_meter.py reproduces the four-note loss it then proves is
+    fixed. Both states are worth testing; only one of them is what ships.
+    """
     fragments = fragments if fragments is not None else _fragments()
     sysdir = os.path.join(SYSTEM_DIR, "homr", STEM)
     parts_by_role, order = {}, []
@@ -231,6 +284,14 @@ def _assemble_real_page(fragments=None):
     for p in page.parts:
         for n, m in enumerate(p.measures, start=1):
             m.number = n
+    # Settle the meter page-wide and fix measures whose content overruns the
+    # meter their own fragment declared. build_page_graph.py does both; this
+    # helper used to skip them, so these tests measured the pre-fix behaviour
+    # while claiming to measure the real one -- and the four dropped notes stayed
+    # invisible here even after the production path had been fixed.
+    if reconcile:
+        resolve_page_meter(page)
+        reconcile_meter(page)
     return page, order, len(systems)
 
 
@@ -253,6 +314,7 @@ class TestRealPage(unittest.TestCase):
     def test_all_invariants_hold(self):
         for check in (check_parts_same_width, check_every_note_typed,
                       check_no_chord_on_rest, check_measures_fill,
+                      check_written_value_matches_duration,
                       check_measures_numbered_sequentially):
             with self.subTest(check=check.__name__):
                 self.assertEqual(check(self.root), [])
@@ -408,6 +470,98 @@ class TestCheckersCatchRegressions(unittest.TestCase):
         problems = check_measures_numbered_sequentially(_root(xml))
         self.assertTrue(problems, "numbering checker missed a gap")
 
+    def test_written_value_checker_catches_overstated_type(self):
+        """A 15-tick note written as a dotted quarter (18) must be caught.
+
+        This is the exact defect MuseScore reported as "Measure 1, staff 1
+        incomplete. Expected: 4/4; Found: 17/16" (6+3+24+18 = 51 = 17/16), and
+        which no cursor-based check in the suite could see.
+        """
+        xml = """<score-partwise version="4.0"><part-list>
+        <score-part id="P1"><part-name>A</part-name></score-part></part-list>
+        <part id="P1"><measure number="1">
+        <attributes><divisions>12</divisions><time><beats>4</beats>
+        <beat-type>4</beat-type></time></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch>
+        <duration>15</duration><type>quarter</type><dot/></note>
+        </measure></part></score-partwise>"""
+        problems = check_written_value_matches_duration(_root(xml))
+        self.assertTrue(problems,
+                        "written-value checker missed an overstated <type>")
+
+    def test_written_value_checker_accepts_exact_time_modification(self):
+        """The same 15 ticks written with an exact 4:5 ratio is honest."""
+        xml = """<score-partwise version="4.0"><part-list>
+        <score-part id="P1"><part-name>A</part-name></score-part></part-list>
+        <part id="P1"><measure number="1">
+        <attributes><divisions>12</divisions><time><beats>4</beats>
+        <beat-type>4</beat-type></time></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch>
+        <duration>15</duration><type>quarter</type>
+        <time-modification><actual-notes>4</actual-notes>
+        <normal-notes>5</normal-notes></time-modification></note>
+        </measure></part></score-partwise>"""
+        self.assertEqual(check_written_value_matches_duration(_root(xml)), [])
+
+
+class TestTypeForIsExact(unittest.TestCase):
+    """The <type> we write must name exactly the ticks we occupy.
+
+    ``_type_for`` is where the overstatement lived: a duration with no plain
+    written value was named by the value at-or-above it, so a 15-tick note
+    became a dotted quarter (18) and MuseScore summed the bar past its meter.
+    Nothing here talks to MuseScore, so this guards every commit.
+    """
+
+    def test_every_duration_names_itself_exactly(self):
+        from fractions import Fraction
+        from scorehalo.emit import _TYPE, _type_for
+
+        def written(dur):
+            name, dots, actual, normal = _type_for(dur)
+            value = Fraction(_TYPE[name]) * GLOBAL_DIVISIONS
+            value *= Fraction(2 ** (dots + 1) - 1, 2 ** dots)
+            if actual:
+                value *= Fraction(normal, actual)
+            return value
+
+        for dur in range(1, 97):
+            with self.subTest(duration=dur):
+                self.assertEqual(written(dur), dur,
+                                 "duration %d is written as %s"
+                                 % (dur, _type_for(dur)))
+
+    def test_awkward_durations_use_the_simplest_ratio(self):
+        """A note is never written under a needlessly exotic tuplet.
+
+        The spelling depends on GLOBAL_DIVISIONS, so assert the property, not
+        the spelling: for any duration with no plain written value, the ratio
+        actually chosen must be the simplest available -- the one minimising the
+        larger of numerator and denominator over every exact note value. 45
+        ticks must come out as a 4:5 tuplet, never as a 15:8 one.
+        """
+        from math import gcd
+        from scorehalo.emit import _TYPE_FOR, _type_for
+        for dur in range(1, 97):
+            if dur in _TYPE_FOR:
+                continue
+            with self.subTest(duration=dur):
+                name, dots, actual, normal = _type_for(dur)
+                self.assertIn(name, _TYPE)
+                self.assertEqual(gcd(actual, normal), 1)
+                want = min(max(dur // gcd(dur, t), t // gcd(dur, t))
+                           for t in _TYPE_FOR)
+                self.assertEqual(max(actual, normal), want,
+                                 "%d written as %d:%d, simplest is %d"
+                                 % (dur, normal, actual, want))
+
+    def test_plain_durations_carry_no_ratio(self):
+        from scorehalo.emit import _TYPE_FOR, _type_for
+        self.assertIn(3, _TYPE_FOR)
+        for dur in _TYPE_FOR:
+            with self.subTest(duration=dur):
+                self.assertEqual(_type_for(dur)[2:], (0, 0))
+
 
 class TestTupletRoundTrip(unittest.TestCase):
     """A 3:2 tuplet must survive parse -> graph -> emit intact."""
@@ -434,7 +588,9 @@ class TestTupletRoundTrip(unittest.TestCase):
             os.unlink(path)
         note = parts[0].measures[0].notes[0]
         self.assertEqual(note.tuplet, (3, 2))
-        self.assertEqual(note.duration, 8)  # normalised to divisions=12
+        # 4 units at <divisions>6</divisions> is 2/3 of a quarter, so the tick
+        # count follows GLOBAL_DIVISIONS (8 when it was 12, 16 now it is 24).
+        self.assertEqual(note.duration, 4 * GLOBAL_DIVISIONS // 6)
 
     def test_type_written_for_every_non_rest_note(self):
         page = Page(id="t", divisions=GLOBAL_DIVISIONS)
