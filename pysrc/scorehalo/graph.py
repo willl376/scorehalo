@@ -151,6 +151,17 @@ class Part:
     #: that assumed treble silently engraved a piano's bass line an octave and
     #: a third too high.
     clef_by_staff: Dict[int, Tuple[str, int]] = field(default_factory=dict)
+    #: Mid-part clef changes, ``(measure_number, staff, (sign, line))``.
+    #: ``clef_by_staff`` is the clef in force at bar 1; this says where a staff
+    #: changes clef later. A clef is not fixed for a whole part -- a piano can
+    #: be written two-treble for a high intro and change the left hand to a bass
+    #: staff when the voice enters, and that change is music, not noise. Without
+    #: this the emitter had one clef per staff for the whole part, so a page
+    #: that opened on a treble left hand could only be published as all-treble
+    #: (which loses the bass staff) or by forcing the bass clef onto bars that
+    #: are genuinely treble (which writes them an octave and a third too high).
+    clef_changes: List[Tuple[int, int, Tuple[str, int]]] = field(
+        default_factory=list)
 
     @property
     def notes(self) -> List[Note]:

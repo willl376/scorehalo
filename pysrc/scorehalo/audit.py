@@ -18,6 +18,7 @@ Checks:
 
 import glob
 import os
+import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 from scorehalo.score import PITCHED, parse_document
@@ -61,6 +62,22 @@ def _fmt(pitch):
     return f"{step}{acc}{octave}"
 
 
+def _empty_measures(path):
+    """(part_index, measure_number) for every measure holding zero <note>.
+
+    Counted from the raw tree rather than from parse_document's note streams: a
+    measure with no notes produces no stream entries, so it is structurally
+    invisible to every duration-based check.
+    """
+    root = ET.parse(path).getroot()
+    out = []
+    for part_idx, part in enumerate(root.iter("part")):
+        for meas in part.iter("measure"):
+            if not any(k.tag.split("}")[-1] == "note" for k in meas):
+                out.append((part_idx, meas.get("number")))
+    return out
+
+
 def audit_file(path):
     doc = parse_document(path)
     flags = []
@@ -94,6 +111,23 @@ def audit_file(path):
                     }
                 )
             seen[local] = pitch
+
+    # A measure with no <note> at all is silent data loss: homr emitted the barline
+    # and dropped the music. It is schema-valid, MuseScore imports it without
+    # complaint, and the score plays a hole. Nothing above can see these, because
+    # per_measure is built FROM note streams -- an empty measure never enters the
+    # map, and the `if total` guards below treat absent content as "no evidence"
+    # rather than "no music". So they are counted from the raw tree instead.
+    for part_idx, measure_no in _empty_measures(path):
+        flags.append(
+            {
+                "check": "empty_measure",
+                "severity": 3,
+                "where": f"part {part_idx} measure {measure_no}",
+                "detail": "measure contains no notes at all - music was dropped, "
+                "not merely mis-spelled",
+            }
+        )
 
     if doc["time"]:
         expected = Fraction(doc["time"][0] * 4, doc["time"][1])

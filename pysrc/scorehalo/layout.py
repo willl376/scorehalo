@@ -62,6 +62,57 @@ def estimate_skew(ink, limit=3.0):
     return float(np.median(angs))
 
 
+def heal_line_gaps(gray, runs, tol=6.0, min_gap=6, min_piece_frac=0.05,
+                   thickness=3):
+    """Draw across breaks in detected horizontal rules.
+
+    A staff whose printed line is interrupted -- by a fold, a tear, a white
+    repair, or (on p0022) a blank patch through the whole system -- reads as
+    *two* staves: the reader groups by continuity, not by spacing, so the two
+    halves of a 3-staff system become six staffs, they all collide, and the
+    system is emitted as one part. Healing the break restores the one thing the
+    reader needs here: an unbroken rule.
+
+    Only *detected* rules are healed (``runs`` from :func:`find_ink_lines`),
+    and only between their own pieces, within ``tol`` of each other and each
+    longer than ``min_piece_frac`` of the page. Printed notation is never
+    touched, so a page with no break comes back unchanged.
+
+    Returns ``(gray, n_pixels)`` -- ``gray`` is the input when nothing was
+    filled, and the caller's array is never overwritten.
+    """
+    if gray is None or not runs:
+        return gray, 0
+    h, w = gray.shape
+    min_piece = w * min_piece_frac
+    groups = []
+    for run in sorted(runs):
+        if groups and abs(run[0] - groups[-1][-1][0]) <= tol:
+            groups[-1].append(run)
+        else:
+            groups.append([run])
+    out = gray
+    filled = 0
+    for group in groups:
+        pieces = sorted((r for r in group if r[2] - r[1] >= min_piece),
+                        key=lambda r: r[1])
+        for a, b in zip(pieces, pieces[1:]):
+            # find_ink_lines returns x1 as one past the last inked column.
+            x0, x1 = int(a[2]), int(b[1])
+            if x1 - x0 < min_gap:
+                continue
+            y = int(round((a[0] + b[0]) / 2.0))
+            half = thickness // 2
+            top, bot = max(0, y - half), min(h, y + half + 1)
+            if bot <= top:
+                continue
+            if out is gray:
+                out = gray.copy()
+            out[top:bot, x0:x1] = 0
+            filled += (bot - top) * (x1 - x0)
+    return out, filled
+
+
 def deskew(gray, angle_deg):
     """Rotate the grayscale image by -angle to level staff lines."""
     if abs(angle_deg) < 0.05:
@@ -77,7 +128,46 @@ def deskew(gray, angle_deg):
 # ------------------------------------------------------------- line finding
 
 
-def find_ink_lines(ink, min_len_frac=0.18, max_thick=14):
+def _longest_run(row):
+    """Longest run of set pixels in a 1-D 0/255 row."""
+    idx = np.flatnonzero(row)
+    if idx.size == 0:
+        return 0
+    breaks = np.flatnonzero(np.diff(idx) > 1)
+    starts = np.concatenate(([0], breaks + 1))
+    ends = np.concatenate((breaks, [idx.size - 1]))
+    return int((idx[ends] - idx[starts] + 1).max())
+
+
+def _split_blob_lines(mask, y0, min_len, gap=3):
+    """Read the staff lines back out of a blob that fused several of them.
+
+    Returns ``[(y_center, thickness), ...]`` in the page's coordinates, given
+    a ``mask`` whose first row sits at ``y0``.
+
+    Dense notation keeps the ink between two staff lines connected, so the
+    horizontal opening never separates them: the pair arrives as ONE
+    component 15-22 px tall, taller than a staff line may be, and is dropped.
+    Losing a blob like that loses the whole staff, and on these pages the
+    staff that gets lost is the voice above the piano -- which is how the
+    singer disappears from the part. The lines are still inside it, though:
+    a staff line is a row carrying a long horizontal run, while the rows
+    between lines carry only note ink. So scan the blob's rows for their
+    longest run and keep the ones that clear ``min_len``, clustered into
+    lines.
+    """
+    rows = [r for r in range(mask.shape[0])
+            if _longest_run(mask[r]) >= min_len]
+    clusters = []
+    for r in rows:
+        if clusters and r - clusters[-1][-1] <= gap:
+            clusters[-1].append(r)
+        else:
+            clusters.append([r])
+    return [(y0 + (c[0] + c[-1]) / 2.0, len(c)) for c in clusters]
+
+
+def find_ink_lines(ink, min_len_frac=0.18, max_thick=14, max_blob_factor=12):
     """Isolate long horizontal rules -> list of (y_center, x0, x1, thick)."""
     h, w = ink.shape
     klen = max(30, int(w * 0.10))
@@ -92,11 +182,21 @@ def find_ink_lines(ink, min_len_frac=0.18, max_thick=14):
     min_len = int(w * min_len_frac)
     for i in range(1, n):
         x, y, cw, ch, _ = stats[i]
-        if cw < min_len or ch > max_thick:
+        if cw < min_len:
             continue
         if cw / max(1, ch) < 8:  # must be line-like, not a blob
             continue
-        out.append((y + ch / 2.0, x, x + cw, ch))
+        if ch <= max_thick:
+            out.append((y + ch / 2.0, x, x + cw, ch))
+            continue
+        # Too tall for one staff line: either several lines fused by dense
+        # notation, or something that is not a staff at all (a page border, a
+        # shaded band). A border touches the paper edge, and a blob that is
+        # not staff lines has no rows of long runs, so both are excluded.
+        if ch > max_blob_factor * max_thick or y < 3 or y + ch > h - 3:
+            continue
+        for cy, thick in _split_blob_lines(labels[y:y + ch] == i, y, min_len):
+            out.append((cy, x, x + cw, thick))
     out.sort()
     return out
 
@@ -311,12 +411,88 @@ def group_systems_by_bracket(staves, vspans, staff_space, edge_margin=None):
     return systems
 
 
+def split_system_by_brace(system, vspans, staff_space):
+    """The staves of ONE system split at its braces, top group first.
+
+    A brace (or a bracket) is the printed boundary between instruments, and it
+    is what tells a singer's staff from the piano's: the singer's bar lines stop
+    at their own staff, while the piano's are drawn across the pair, so a
+    vertical rule that spans two staff bands links exactly the staves that are
+    one instrument.
+
+    This is :func:`group_systems_by_bracket` asked the same question about a
+    single system, and it is the granularity homr needs: it reads a lone staff
+    and a braced pair reliably, while a whole three-staff system on a dense page
+    it reads and then merges into one part (see :mod:`scorehalo.fragments`).
+
+    When no vertical rule links two staves the system is returned WHOLE: nothing
+    was measured about the part boundary, and splitting into singletons would
+    assert that every staff is its own instrument -- for a piano, a worse error
+    than the merge this exists to avoid.
+    """
+    groups = group_systems_by_bracket(system["staves"], vspans,
+                                      staff_space or 20.0)
+    if not any(len(g["staves"]) > 1 for g in groups):
+        return [system]
+    return sorted(groups, key=lambda g: min(s["y_top"] for s in g["staves"]))
+
+
 def _x_overlap(a, b):
     lo = max(a["x0"], b["x0"])
     hi = min(a["x1"], b["x1"])
     inter = max(0, hi - lo)
     narrow = min(a["x1"] - a["x0"], b["x1"] - b["x0"])
     return inter / narrow if narrow > 0 else 0.0
+
+
+def _join_systems(above, below):
+    """One system from two, keeping the staves in printed order."""
+    return _finish_system(sorted(above["staves"] + below["staves"],
+                                 key=lambda s: s["y_top"]))
+
+
+def attach_orphan_staves(systems, max_lonely=1):
+    """Fold a one-staff system into the system it belongs to.
+
+    A system is found by the vertical rules spanning it, and on this sort of
+    page the rule that binds the accompaniment spans only the piano pair: the
+    voice staff's bar lines are ~70 px long, while the vertical opening that
+    finds rules runs a kernel 4% of the page height (~132 px), so they are
+    erased. The voice staff is then left alone -- a one-staff "system"
+    sitting directly above the accompaniment it sings with -- and the grid,
+    which fits every system onto the page's tallest layout, sees alternating
+    one- and two-staff systems. The tallest layout is then two rows, the
+    voice row is not in the grid at all, and the vocal part disappears from
+    the piece; on the pages this was written for, that is the whole bug.
+
+    A song grows upwards: the accompaniment is printed at the foot of a
+    system and whatever the page adds is stacked above it, so a lone staff is
+    the top line of the system below. A system at the very foot of the page
+    has nothing below it and joins the one above instead. ``max_lonely`` is
+    the largest a system may be to count as a stray: a real system on these
+    pages is never smaller than a braced pair, so a pair is never dissolved
+    into an orphan, and two lone staves in a row are left as they are rather
+    than fused on no evidence.
+    """
+    n = len(systems)
+    joined = [False] * n
+    out = []
+    for i in range(n):
+        if joined[i]:
+            continue
+        sysd = systems[i]
+        if sysd["n_staves"] > max_lonely:
+            out.append(sysd)
+            continue
+        below = i + 1 < n and not joined[i + 1] and systems[i + 1]["n_staves"] > max_lonely
+        if below:
+            joined[i + 1] = True
+            out.append(_join_systems(sysd, systems[i + 1]))
+        elif out and out[-1]["n_staves"] > max_lonely:
+            out[-1] = _join_systems(out[-1], sysd)
+        else:
+            out.append(sysd)
+    return out
 
 
 def _finish_system(group):
@@ -344,6 +520,10 @@ def analyze_page(gray, min_staff_lines=3, max_gap_factor=7.0,
     level = deskew(gray, skew)
     ink = binarize_gray(level)
     raw = find_ink_lines(ink, min_len_frac=min_len_frac)
+    # Close breaks in the printed staff lines before anything is cropped from
+    # this image: an interrupted staff is read as two staves. The measurements
+    # below still come from the unhealed page -- only the kept image changes.
+    level, n_healed = heal_line_gaps(level, raw)
     lines = merge_collinear(raw)
     # Two-pass spacing. Pass 1 estimates staff spacing while ignoring tight
     # slivers; pass 2 deletes near-duplicate lines that are too close together
@@ -365,6 +545,7 @@ def analyze_page(gray, min_staff_lines=3, max_gap_factor=7.0,
         alt = group_systems(staves, space or 20.0, max_gap_factor=max_gap_factor)
         if alt and len(alt) < len(systems if systems else alt):
             systems = alt
+    systems = attach_orphan_staves(systems)
     return {
         "skew_deg": round(skew, 3),
         "staff_space": round(space, 2),
@@ -376,6 +557,7 @@ def analyze_page(gray, min_staff_lines=3, max_gap_factor=7.0,
         "n_staves": len(staves),
         "n_systems": len(systems),
         "n_slivers_removed": n_slivers,
+        "n_healed_px": n_healed,
         "deskewed": level,
     }
 

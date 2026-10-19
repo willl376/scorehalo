@@ -8,6 +8,8 @@ import sys
 import numpy as np
 import cv2
 
+from .graphics import photo_fraction
+
 
 def triage(path):
     img = cv2.imread(path)
@@ -58,6 +60,9 @@ def triage(path):
         "h_line%": round(line_density * 100, 2),
         "staff-like rows": len(line_thicknesses),
         "interline_est_px": (round(interline_est, 1) if interline_est else None),
+        # Share of the page's centre that is a smooth mid-tone: the signature
+        # of a pictured graphic, measured in `graphics.py`.
+        "photo%": round(photo_fraction(gray), 2),
     }
 
 

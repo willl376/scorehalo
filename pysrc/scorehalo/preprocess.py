@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scorehalo.graphics import PAGE_PHOTO_PCT
 from scorehalo.triage import triage
 
 
@@ -39,8 +40,14 @@ def enhance(input_path, out_path, contrast=True, sharpen=True):
 def is_music_page(input_path, min_hline=0.8, min_ink=0.3):
     """Cheap gate to skip clearly non-music pages (photos, covers, blanks).
 
-    Uses long-horizontal-line density + ink as a staff proxy, plus a
-    strong-color check for photograph pages.
+    Uses long-horizontal-line density + ink as a staff proxy, a strong-color
+    check for photograph pages, and the smooth-mid-tone measure from
+    :mod:`scorehalo.graphics` for a pictured graphic.
+
+    The graphic test runs FIRST and is named separately, because "there is a
+    picture here" and "this does not look like staves" are different findings:
+    the first is a fact about the page, the second is a guess, and the manifest
+    should say which one it recorded.
     """
     stats = triage(input_path)
     if stats is None:
@@ -48,6 +55,9 @@ def is_music_page(input_path, min_hline=0.8, min_ink=0.3):
     h = stats["h_line%"]
     ink = stats["ink%"]
     color = stats["colorfulness"]
+    photo = stats.get("photo%", 0.0)
+    if photo >= PAGE_PHOTO_PCT:
+        return False, stats, "skip: pictured graphic (%.1f%% photo-like)" % photo
     # Photo page: heavily saturated + few long lines -> skip before we spend
     # precious CPU guessing at a photograph.
     if color > 15 and h < 2.0:

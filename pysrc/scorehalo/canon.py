@@ -40,6 +40,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -147,6 +148,26 @@ def roundtrip(src, musescore_bin=None, timeout=300):
     return None, last
 
 
+def _pdf_pages(pdf_path):
+    """Page count from a PDF, by counting page objects.
+
+    Deliberately not a PDF library: we only need "is there at least one page",
+    and depending on a parser for that would add a failure mode to the referee.
+
+    Two things this must get right, both of which the first version got wrong:
+    LilyPond writes ``/Type/Page`` with **no space** before the name, and
+    ``/Type/Page`` is a **prefix of** ``/Type/Pages`` -- so counting one and
+    subtracting the other cancels to zero on a perfectly good one-page score.
+    The boundary has to be explicit.
+    """
+    try:
+        with open(pdf_path, "rb") as handle:
+            blob = handle.read()
+    except OSError:
+        return 0
+    return len(re.findall(rb"/Type\s*/Page(?![s])", blob))
+
+
 def lilypond_verdicts(path, timeout=300):
     """Ask LilyPond to engrave the page and report what it complained about."""
     m2l = shutil.which("musicxml2ly")
@@ -171,7 +192,21 @@ def lilypond_verdicts(path, timeout=300):
             line.strip() for line in text.splitlines()
             if any(w in line.lower() for w in ("barcheck", "slur", "warning", "error"))
         ]
-        return {"rc": r.returncode, "complaints": keep}
+        # rc=0 with no complaints is NOT success on its own. LilyPond happily
+        # exits clean and engraves nothing when a file only DEFINES music and
+        # never asks for it to be displayed -- define a variable, assign notes to
+        # it, forget the `<<>>` that shows it, and the log says nothing at all.
+        # So confirm the artefact actually exists and has pages in it.
+        rendered = os.path.exists(stem + ".pdf") and os.path.getsize(stem + ".pdf") > 0
+        pages = _pdf_pages(stem + ".pdf") if rendered else 0
+        return {
+            "rc": r.returncode,
+            "complaints": keep,
+            "rendered": rendered,
+            "pages": pages,
+            # A silent failure is worse than a loud one, so it is stated first.
+            "silent_no_output": bool(not rendered or pages == 0),
+        }
     except subprocess.TimeoutExpired:
         return {"error": "timeout"}
     finally:

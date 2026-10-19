@@ -6,13 +6,12 @@ Why this exists next to ``musicxml2ly``
 is deliberately **not** a competing general-purpose converter. It exists because
 two things ``musicxml2ly`` structurally cannot do:
 
-1. **It throws the page away.** ``musicxml2ly`` emits ``\\pointAndClickOff`` and
-   MusicXML has nowhere to put a note's pixel position on the original scan.
-   The whole premise of :mod:`scorehalo.graph` is that ``src_x``/``src_y``,
-   ``staff`` and ``system`` survive to this point. Emitting from the graph keeps
-   them, as a source comment on the note's own line -- so LilyPond's native
-   point-and-click lands on a line that says *which pixel of which scan page*
-   the note came from.
+1. **It throws the page away.** ``musicxml2ly`` emits ``\\pointAndClickOff``, so
+   its PDF has no links back into the source. This module emits
+   ``\\pointAndClickOn``, which is what lets Frescobaldi jump from a note in the
+   rendered page to the line in this file that produced it. (Pixel-level
+   provenance on top of that -- *which pixel of which scan* -- is wired and
+   inert: see :func:`_provenance`.)
 2. **It cannot express the page's staff topology.** A piano role is *one
    instrument on two staves*. MusicXML models that as a ``<part>`` with
    ``<staves>2</staves>`` and back-and-forth ``<backup>``; this emits the
@@ -20,7 +19,7 @@ two things ``musicxml2ly`` structurally cannot do:
    because the graph already knows simultaneity by equal onset and never needed
    a cursor to get there.
 
-So: ``scorehalo toly`` for provenance and correct grand staffs,
+So: ``scorehalo toly`` for working point-and-click and correct grand staffs,
 ``musicxml2ly`` when you want the reference converter's answer.
 
 Conventions
@@ -288,13 +287,30 @@ def pitch_token(note: Note) -> str:
 def _provenance(note: Note) -> str:
     """A comment on the note's own line naming the source pixel.
 
-    This is what makes a point-and-click link mean something: the .ly line
-    LilyPond jumps to says which pixel of which scan the note came from.
+    Returns "" for every note in practice, and that is the honest answer.
+
+    ``Note.src_x``/``src_y`` are never assigned anywhere in this codebase, and
+    homr's MusicXML carries no position data at all -- there is no ``x``/``y``
+    attribute anywhere in its output to read. The previous version of this
+    function defaulted them to -1 and emitted
+
+        \\markup { \\typewriter "(x=-1 y=-1 sys=1 staff=2)" }
+
+    on *every note of every bar*: markup that looks like provenance, is pure
+    noise, and asserts a coordinate that does not exist. It also made LilyPond
+    emit a collision warning per note.
+
+    So: emit provenance only when there is a pixel to name. If homr ever starts
+    writing coordinates -- its attention-based ones are, in homr's own words,
+    "inherently imprecise", so it may never -- this starts working with no code
+    change. Until then the note's system and staff remain visible in the .ly
+    structure itself, and Frescobaldi's point-and-click jumps to the right line
+    on its own.
     """
-    x = note.src_x if note.src_x is not None else -1
-    y = note.src_y if note.src_y is not None else -1
+    if note.src_x is None or note.src_y is None:
+        return ""
     return ('\\markup { \\typewriter "(x=%d y=%d sys=%d staff=%d)" }'
-            % (x, y, note.system, note.staff))
+            % (note.src_x, note.src_y, note.system, note.staff))
 
 
 # --------------------------------------------------------------------------
@@ -319,13 +335,23 @@ def clamp_to_bar(notes: Sequence[Note],
     out: List[Note] = []
     damaged = 0
     cursor = 0
+    prev_onset = None
     for n in ordered:
         start, end = n.onset, n.onset + n.duration
         touched = False
         if end <= 0 or n.onset >= limit:
             damaged += 1
             continue
-        if start < cursor:
+        # A chord is several notes at ONE onset, and it is not an overlap: the
+        # second note of a two-note chord starts exactly where the first does.
+        # This used to be judged by a single running cursor, so every chord tone
+        # after the first was "trimmed" -- 18 notes on p0020, all of them chord
+        # tones, none of them overlapping anything. The emitter never had this
+        # bug: it groups by (voice, onset, staff), so a chord is one event.
+        # Only a note that starts AFTER a previous onset and BEFORE that note
+        # ended is a real overlap.
+        is_chord_tone = prev_onset is not None and n.onset == prev_onset
+        if start < cursor and not is_chord_tone:
             start = cursor
             touched = True
         if start >= limit:
@@ -342,6 +368,7 @@ def clamp_to_bar(notes: Sequence[Note],
             n = replace(n, onset=start, duration=end - start)
         out.append(n)
         cursor = end
+        prev_onset = n.onset
     return out, damaged
 
 
@@ -402,30 +429,39 @@ def _resolve_slurs(notes: Sequence[Note]) -> List[Note]:
     separate voices (or uses ``\\=``), not a cleverer pairing here.
 
     Pairing walks each voice in document order, so a slur may cross a barline.
+
+    The returned list is in the INPUT order, not the sorted one, because that
+    is the contract the caller relies on: it zips the result back against the
+    per-measure buckets. It used to return ``order`` (the sorted list) and the
+    promise in the docstring was simply untrue. With one note per onset the two
+    orders coincide, so nothing showed. As soon as a CHORD puts two notes on the
+    same ``(staff, voice, measure, onset)`` the sort key ties -- it carries no
+    pitch tiebreaker -- ``sorted()`` may permute them, and a slur mark is then
+    attached to the wrong note. Measured on p0020: a slur's ``(`` vanished and
+    two ``)`` were left behind, which is the "cannot end slur" syntax error.
+    Marks are therefore keyed by ``id(note)`` and the input order is returned.
     """
     order = sorted(notes, key=lambda n: (n.staff, n.voice, n.measure, n.onset))
-    index = {id(n): i for i, n in enumerate(order)}
     marks: Dict[int, str] = {}
     streams: Dict[Tuple[int, int], List[Note]] = {}
     for n in order:
         streams.setdefault((n.staff, n.voice), []).append(n)
     for stream in streams.values():
-        open_at: Optional[int] = None
+        open_at: Optional[Note] = None
         for n in stream:
-            here = index[id(n)]
             if n.slur == "start":
                 if open_at is None:
-                    open_at = here
+                    open_at = n
                 # else: overlapping span -- drop, see hazard 2
             elif n.slur == "stop":
                 if open_at is None:
                     continue  # orphan stop: a bare ')' is a syntax error
-                marks[open_at] = "("
-                marks[here] = ")"
+                marks[id(open_at)] = "("
+                marks[id(n)] = ")"
                 open_at = None
             # an orphan start never reaches a stop, so it emits nothing
-    return [replace(n, slur_mark=marks.get(i)) if i in marks else n
-            for i, n in enumerate(order)]
+    return [replace(n, slur_mark=marks[id(n)]) if id(n) in marks else n
+            for n in notes]
 
 
 def _render_event(ev: _Event, divisions: int, provenance: bool,
@@ -456,13 +492,28 @@ def _render_event(ev: _Event, divisions: int, provenance: bool,
         tie = ev.notes[0].tie
         post = "~" if tie == "start" else ""
         if provenance:
-            post += "^" + _provenance(ev.notes[0])
+            # Only attach the markup when there is a real pixel to name;
+            # _provenance returns "" otherwise, and "^" with nothing after it
+            # would attach an empty markup to every note in the score.
+            mark = _provenance(ev.notes[0])
+            if mark:
+                post += "^" + mark
     # A slur is a post-event like a tie: `c4( d)`. `(` opens on the first
     # note of the phrase and `)` closes on the last. It comes from
     # _resolve_slurs, which sets it only on notes it successfully paired, so
     # this can never be an unmatched bracket.
-    if ev.notes[0].slur_mark:
-        post += ev.notes[0].slur_mark
+    #
+    # The mark must be read from EVERY tone of the event, not just the first.
+    # _resolve_slurs marks one note per event, and for a CHORD that note is
+    # whichever tone the slur started on -- not necessarily the one that sorts
+    # first. Reading only ev.notes[0] silently dropped the `(` whenever the
+    # slur began on a lower chord tone, leaving its `)` behind: measured on
+    # p0020, one voice rendered 0 opens and 2 closes, which is exactly the
+    # "cannot end slur" syntax error. The bracket still belongs to the event,
+    # so any tone may carry it.
+    slur = next((n.slur_mark for n in ev.notes if n.slur_mark), None)
+    if slur:
+        post += slur
 
     try:
         duration = duration_token(written)
@@ -592,16 +643,69 @@ def _indent(text: str, pad: int) -> str:
     return "\n".join(" " * pad + line if line else line for line in text.split("\n"))
 
 
+#: General MIDI instruments for the roles homr actually emits. Without one of
+#: these a staff renders under LilyPond's default sound, so a General MIDI export
+#: of a score whose parts are "Piano" and "Voice" plays two generic instruments
+#: and the audition says nothing about whether the notes are right.
+#:
+#: Only unambiguous roles are listed. An unrecognised role is left without a
+#: ``midiInstrument`` on purpose: guessing a sound is the same class of error as
+#: guessing a clef, which is already a known problem on this project.
+#: Names are LilyPond's own, from scm/lily/midi.scm, and they contain SPACES.
+#: The first version of this map used General MIDI's underscore spellings
+#: (``acoustic_grand_piano``, ``choir_aahs``) and every one was rejected --
+#: "warning: no such MIDI instrument" x4 on a clean page. Guessing an external
+#: contract instead of reading it, which is the same error as guessing a clef.
+MIDI_INSTRUMENTS = {
+    "piano": "acoustic grand",
+    "voice": "choir aahs",
+    "choir": "choir aahs",
+    "violin": "violin",
+    "viola": "viola",
+    "cello": "cello",
+    "flute": "flute",
+    "oboe": "oboe",
+    "clarinet": "clarinet",
+    "trumpet": "trumpet",
+    "organ": "church organ",
+}
+
+
+def _midi_property(role):
+    """The ``midiInstrument`` clause for a role, or ``None``.
+
+    Split out because MIDI is per-STAFF: on a grand staff every child
+    ``\\new Staff`` needs its own copy, and whether a group's property
+    reaches its staves is not something to bet an audition on.
+    """
+    midi = MIDI_INSTRUMENTS.get((role or "").strip().lower())
+    return ('midiInstrument = "%s"' % midi) if midi else None
+
+
+def _staff_properties(role):
+    """The contents of a staff's ``\\with { ... }`` block."""
+    parts = ['instrumentName = "%s"' % role]
+    midi = _midi_property(role)
+    if midi:
+        # Inert unless a \\midi block is present, so it costs nothing to always
+        # emit, and an audition then sounds like the instrument named.
+        parts.append(midi)
+    return " ".join(parts)
+
+
 def _role_block(role: str, notes: Sequence[Note], index: int,
                 measures: Sequence[Measure], provenance: bool,
                 stats: Optional[Dict[str, int]] = None,
                 part_clefs: Optional[Dict[int, Tuple[str, int]]] = None
                 ) -> Tuple[str, int]:
-    """Emit one role (instrument) as a LilyPond ``Staff``.
+    """Emit one role (instrument) as a LilyPond ``PianoStaff``/``Staff``.
 
-    Two staves of one role become ``<< { ... } \\\\ { ... } >>`` -- the ordinary
-    grand staff -- rather than two separate parts, because they are one
-    instrument sounding together.
+    A single-staff role becomes one ``\\new Staff``. Two staves of one role
+    become a ``\\new PianoStaff`` holding two ``\\new Staff`` contexts --
+    the ordinary grand staff -- rather than two separate parts, because they
+    are one instrument sounding together. Each printed staff MUST be its
+    own Staff context: ``<< { ... } \\\\ { ... } >>`` inside one Staff is
+    just two voices on ONE staff line, which collapses the grand staff.
     """
     staves = _role_staves(notes)
     lines: List[str] = []
@@ -678,10 +782,30 @@ def _role_block(role: str, notes: Sequence[Note], index: int,
             inner = ("\n" + _indent(" ".join(voice_blocks), 2) + "\n")
             lines.append("<<" + inner + ">>")
 
-    joined = ("\n" + _indent(" \\\\\n".join(lines), 2) + "\n")
-    block = (f'\\new Staff = "role{index}"\n'
-             f'  \\with {{ instrumentName = "{role}" }}\n'
-             f"  <<" + joined + ">>")
+    if len(lines) == 1:
+        joined = ("\n" + _indent(lines[0], 2) + "\n")
+        block = (f'\\new Staff = "role{index}"\n'
+                 f'  \\with {{ {_staff_properties(role)} }}\n'
+                 f"  <<" + joined + ">>")
+    else:
+        # ONE Staff context per printed staff. Joining a role's staves with
+        # \\ inside a single Staff does NOT make a grand staff: simultaneous
+        # streams share one staff line, so the staves collapse into one and
+        # the two clefs fight at bar 1. Measured on p0020 before this split:
+        # the rendered .ly had 2 staves where the page has 3 (Piano 2 +
+        # Voice 1). instrumentName rides on the PianoStaff so the name
+        # prints once; midiInstrument rides on EVERY Staff (via
+        # _staff_properties on the group and explicitly on each child)
+        # because MIDI is per-Staff and group-to-child inheritance is not
+        # something to bet an audition on.
+        midi = _midi_property(role)
+        child_with = (" \\with { %s }" % midi) if midi else ""
+        children = "\n".join(
+            "    \\new Staff%s\n      <<%s>>" % (child_with, line)
+            for line in lines)
+        block = (f'\\new PianoStaff = "role{index}"\n'
+                 f'  \\with {{ {_staff_properties(role)} }}\n'
+                 f"  <<\n" + children + "\n  >>")
     if stats is not None:
         stats["clamped_notes"] = stats.get("clamped_notes", 0) + clamped_total
         stats["staves"] = stats.get("staves", 0) + len(staves)
@@ -708,8 +832,12 @@ def to_ly(page: Page, version: str = "2.24.3", title: Optional[str] = None,
         ``\\version`` string. 2.24.3 is the system LilyPond; 2.26.0 also runs.
     point_and_click:
         Emit ``\\pointAndClickOn`` so the PDF carries links back into the .ly.
+        This is what Frescobaldi's point-and-click needs; the previous version
+        of this function documented the same promise but only wrote a comment.
     provenance:
-        Annotate each note with the scan pixel it came from.
+        Annotate each note with the scan pixel it came from. Inert while
+        :attr:`~scorehalo.graph.Note.src_x` is ``None``, which it always is --
+        see :func:`_provenance`.
     midi:
         Also emit a ``\\midi`` block.
     snippet:
@@ -729,7 +857,13 @@ def to_ly(page: Page, version: str = "2.24.3", title: Optional[str] = None,
     # accidentals are the first thing to fail.
     head += '\n\\language "nederlands"'
     if point_and_click:
-        head += "\n% scan provenance: x/y are pixels on the source page"
+        # Actually turn it on. This branch used to add a *comment* about scan
+        # provenance, so the PDF carried no links and Frescobaldi had nothing to
+        # click -- while the docstring below promised "\\pointAndClickOn so the
+        # PDF carries links back into the .ly". musicxml2ly turns it OFF, and
+        # since this module exists to replace musicxml2ly, not turning it back
+        # on meant the replacement quietly lost a feature the original had.
+        head += "\n\\pointAndClickOn"
 
     blocks: List[str] = []
     seen: List[str] = []

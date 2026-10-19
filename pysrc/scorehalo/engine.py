@@ -30,16 +30,33 @@ def run_homr(image_path, work_dir, timeout=600):
     path is None on failure; the log always exists. Callers MUST unpack all
     three -- the previous version of this docstring claimed a bare path and
     that lie has already cost one caller a TypeError.
+
+    A timeout is a *failure*, not an exception: returncode -1 with the timeout
+    written to the log. The engine is a transformer asked to find notation, so
+    a picture (or a page nothing like notation) can keep it searching until the
+    budget runs out; letting ``TimeoutExpired`` escape would end a whole book's
+    run at that page, which is the stall this return value exists to prevent.
+    ``subprocess.run`` kills the child on timeout, so nothing keeps spinning.
     """
     os.makedirs(work_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     staged = os.path.join(work_dir, base + "_in.png")
     shutil.copy(image_path, staged)
-    proc = subprocess.run(
-        [_homr_binary(), staged],
-        capture_output=True, text=True, timeout=timeout,
-    )
     log_path = os.path.join(work_dir, base + ".homr.log")
+    try:
+        proc = subprocess.run(
+            [_homr_binary(), staged],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        with open(log_path, "w") as fh:
+            fh.write("homr timed out after %ss\n" % timeout)
+            for stream in (getattr(exc, "stdout", None),
+                           getattr(exc, "stderr", None)):
+                if stream:
+                    fh.write(stream if isinstance(stream, str)
+                             else stream.decode("utf-8", "replace"))
+        return None, log_path, -1
     with open(log_path, "w") as fh:
         fh.write(proc.stdout)
         fh.write(proc.stderr)

@@ -184,8 +184,9 @@ def _merge_regions(page_measures, extras, first_staff=3, total_staves=None):
                 amp = ET.Element("attributes")
                 target.insert(0, amp)
             if total_staves is not None and amp.find("staves") is None:
-                st = ET.SubElement(amp, "staves")
+                st = ET.Element("staves")
                 st.text = str(total_staves)
+                _insert_ordered(amp, st)
             # this staff needs its own clef; clone the region's bass clef if it
             # declared one, otherwise a plain F clef
             if not _has_clef_for(amp, staff_no):
@@ -204,7 +205,50 @@ def _merge_regions(page_measures, extras, first_staff=3, total_staves=None):
                     ET.SubElement(cloned, "sign").text = "F"
                     ET.SubElement(cloned, "line").text = "4"
                 cloned.set("number", str(staff_no))
-                amp.append(cloned)
+                _insert_ordered(amp, cloned)
+
+
+# W3C MusicXML 4.0 models <attributes> as an ORDERED sequence (complexType
+# "attributes", musicxml.xsd), not a bag. Appending a child therefore corrupts
+# the document: a <staves> added with ET.SubElement lands *after* <clef> and the
+# file stops validating -- while MuseScore still imports it, so nothing complains.
+# Verified against the real XSD: 35 measures of the joined Carpenters score were
+# schema-invalid for exactly this reason, while all 181 page files validated.
+_ATTR_ORDER = (
+    "footnote",
+    "level",
+    "divisions",
+    "key",
+    "time",
+    "staves",
+    "part-symbol",
+    "instruments",
+    "clef",
+    "staff-details",
+    "transpose",
+    "directive",
+    "measure-style",
+)
+
+
+def _insert_ordered(attributes, element):
+    """Insert `element` into an <attributes> block at its schema position."""
+    name = _local(element.tag)
+    try:
+        rank = _ATTR_ORDER.index(name)
+    except ValueError:
+        attributes.append(element)
+        return element
+    for i, child in enumerate(attributes):
+        child_name = _local(child.tag)
+        child_rank = (
+            _ATTR_ORDER.index(child_name) if child_name in _ATTR_ORDER else -1
+        )
+        if child_rank > rank:
+            attributes.insert(i, element)
+            return element
+    attributes.append(element)
+    return element
 
 
 def _has_clef_for(amp, staff_no):
@@ -231,8 +275,9 @@ def _set_staves(measure, count):
             if _local(g.tag) == "staves":
                 g.text = str(count)
                 return True
-        st = ET.SubElement(child, "staves")
+        st = ET.Element("staves")
         st.text = str(count)
+        _insert_ordered(child, st)
         return True
     return False
 

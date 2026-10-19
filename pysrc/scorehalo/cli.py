@@ -9,7 +9,10 @@ import glob
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cv2  # noqa: E402
+
 from scorehalo import __version__, pdf, engine, validate, preprocess, repair
+from scorehalo import graphics  # noqa: E402
 
 
 def parse_pages(spec, count):
@@ -138,11 +141,33 @@ def cmd_convert(args):
             manifest["pages"].append(entry)
             continue
 
+        # Bypass pictured graphics *inside* a music page before the engine sees
+        # it. Here there is no staff geometry yet (this path hands the page to
+        # homr), so every detected picture goes -- the page-level gate above
+        # already removed pages that are wholly a picture.
+        engine_src = img
+        gray = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
+        if gray is not None:
+            regions = graphics.find_graphics(gray)
+            if regions:
+                masked_path = os.path.join(out_dir, "masked", f"p{n:04d}.png")
+                os.makedirs(os.path.dirname(masked_path), exist_ok=True)
+                if cv2.imwrite(masked_path, graphics.blank(gray, regions)):
+                    entry["graphics_masked"] = [list(r["box"]) for r in regions]
+                    print(f"[p{n}] masked {len(regions)} pictured graphic(s): "
+                          + ", ".join(str(r["box"]) for r in regions))
+                    engine_src = masked_path
+                else:
+                    # Not fatal: the page still has its music, and a book run
+                    # must not end because one masked copy could not be saved.
+                    print(f"[p{n}] WARN: could not write {masked_path}; "
+                          "running on the unmasked page")
+
         # optional enhancement pass produces the actual engine input
-        engine_img = img
+        engine_img = engine_src
         if args.enhance:
             enh_path = os.path.join(out_dir, "enhanced", f"p{n:04d}.png")
-            preprocess.enhance(img, enh_path)
+            preprocess.enhance(engine_src, enh_path)
             engine_img = enh_path
             entry["enhanced"] = enh_path
 
