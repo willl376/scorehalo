@@ -21,20 +21,32 @@ def check(path, verbose=True):
 
     for p in parts:
         divisions = None
+        staves = None
+        # MusicXML attributes are inherited: <time> appears only when the
+        # meter changes, exactly as <divisions> and <staves> do. Keeping the
+        # meter in the loop reset it to 4/4 on every measure that did not
+        # restate it, so a 6/8 piece was read as 6/8 only in its first bar
+        # and "bar short" against 4/4 everywhere after -- a false alarm that
+        # said nothing about the file and everything about this checker.
+        beats = None
+        beat_type = None
         pid = p.get("id")
         for mi, m in enumerate(p.findall("measure"), start=1):
             where = "part %s measure %s" % (pid, m.get("number"))
             a = m.find("attributes")
             if a is not None and a.findtext("divisions"):
                 divisions = int(a.findtext("divisions"))
-            if divisions is None:
-                problems.append("%s: no <divisions> in effect" % where)
-                break
-            beats = 4
-            beat_type = 4
+            if a is not None and a.findtext("staves"):
+                staves = int(a.findtext("staves"))
             if a is not None and a.find("time") is not None:
                 beats = int(a.findtext("time/beats") or 4)
                 beat_type = int(a.findtext("time/beat-type") or 4)
+            if divisions is None:
+                problems.append("%s: no <divisions> in effect" % where)
+                break
+            if beats is None or beat_type is None:
+                problems.append("%s: no <time> in effect" % where)
+                break
             expected = beats * divisions * 4 // beat_type
 
             # order matters: attributes must precede notes
@@ -44,14 +56,40 @@ def check(path, verbose=True):
                     problems.append("%s: <attributes> after notes" % where)
 
             cursor = 0
-            lowest = 0
             for el in m:
                 if el.tag in ("note", "forward", "backup"):
+                    # Which staff does this land on, and did the part ever
+                    # declare it has that many? MuseScore's "illegal staff '2'"
+                    # came from notes on staff 2 of a part whose <staves> was
+                    # never emitted -- a whole page of errors this validator
+                    # read as clean, because it never joined the two fields.
+                    ref = el.findtext("staff")
+                    if ref:
+                        n = int(ref)
+                        # Absent <staves> defaults to 1, so a lone <staff>1</staff>
+                        # is legal redundancy; what cannot happen is a reference
+                        # to staff 2 of a part that never said it has two.
+                        limit = 1 if staves is None else staves
+                        if n > limit:
+                            declared = ("no <staves> declared (defaults to 1)"
+                                        if staves is None
+                                        else "<staves> declares %d" % staves)
+                            problems.append(
+                                "%s: lands on staff %d but %s"
+                                % (where, n, declared))
                     dur = el.findtext("duration")
                     d = int(dur) if dur else 0
                     if el.tag == "backup":
+                        # Remember where the cursor stood before this backup
+                        # so an overshoot can report the real "before" value
+                        # instead of echoing the same number twice.
+                        prev_cursor = cursor
                         cursor -= d
-                        lowest = min(lowest, cursor)
+                        if cursor < 0:
+                            problems.append(
+                                "%s: <backup> overshoots to %d "
+                                "(cursor before backup was %d)"
+                                % (where, cursor, prev_cursor))
                     elif el.tag == "forward":
                         cursor += d
                     else:
@@ -61,10 +99,6 @@ def check(path, verbose=True):
                     pass
                 elif el.tag not in ("attributes", "sound"):
                     pass
-            if lowest < 0:
-                problems.append("%s: <backup> overshoots to %d "
-                                "(cursor before it was %d)"
-                                % (where, lowest, lowest + 0))
             if cursor > expected:
                 problems.append("%s: bar overflows: %d > %d ticks"
                                 % (where, cursor, expected))
@@ -76,6 +110,8 @@ def check(path, verbose=True):
             print("  %d problem(s):" % len(problems))
             for x in problems[:25]:
                 print("    - %s" % x)
+            if len(problems) > 25:
+                print("    ... and %d more" % (len(problems) - 25))
         else:
             print("  clean: %d parts, %d measures, no violations"
                   % (len(parts), len(root.findall(".//measure"))))

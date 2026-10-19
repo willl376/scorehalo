@@ -31,10 +31,16 @@ CACHE = "/tmp/opencode/pagecache"
 def load_gray(man, page, name):
     cp = f"{CACHE}/{name}.png"
     if os.path.exists(cp):
-        return np.array(Image.open(cp).convert("L"))
+        try:
+            return np.array(Image.open(cp).convert("L"))
+        except OSError:
+            os.remove(cp)  # truncated/corrupt cache entry -> re-render
     import pypdfium2 as pdfium
     pdf = pdfium.PdfDocument(man["source"])
-    gray = np.array(pdf[page - 1].render(scale=300 / 72).to_pil().convert("L"))
+    try:
+        gray = np.array(pdf[page - 1].render(scale=300 / 72).to_pil().convert("L"))
+    finally:
+        pdf.close()
     Image.fromarray(gray).save(cp)
     return gray
 
@@ -49,7 +55,8 @@ def main(argv=None):
                     help="min staff width as a fraction of page width")
     args = ap.parse_args(argv)
 
-    man = json.load(open(os.path.join(args.out_dir, "manifest.json")))
+    with open(os.path.join(args.out_dir, "manifest.json")) as fh:
+        man = json.load(fh)
     recs = [p for p in man["pages"] if p.get("status") == "ok"]
     os.makedirs(CACHE, exist_ok=True)
     rows = []
@@ -82,8 +89,10 @@ def main(argv=None):
                 flags.append((i + 1, why))
         worst = max(s["resid"] for s in staves)
         minw = min(s["width"] for s in staves)
-        grp = [len(sys_["staves"]) if isinstance(sys_, dict) and "staves" in sys_
-               else 1 for sys_ in r["systems"]]
+        # layout.analyze_page guarantees every system dict carries n_staves
+        # (see _finish_system); read it directly so a structure change fails
+        # loudly instead of silently degrading to all-ones.
+        grp = [sys_["n_staves"] for sys_ in r["systems"]]
         print(f"  {name:>6} {len(staves):>6} {len(r['systems']):>4} "
               f"{r['staff_space']:>6.1f} {mean_sp:>6.1f} "
               f"{r['n_slivers_removed']:>5} {worst:>7.1f} {minw:>5}  {len(flags)}")
