@@ -151,3 +151,101 @@ def format_overrides(overrides: List[MeterOverride]) -> str:
                         o.now[0], o.now[1], o.needed, o.declared_held,
                         o.needed - o.declared_held))
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class BarExtension:
+    """One bar lengthened page-wide because its content overran the meter."""
+
+    measure: int
+    was: Tuple[int, int]
+    now: Tuple[int, int]
+    #: Ticks the widest part's content occupies at this bar.
+    needed: int
+    #: Ticks the bar held before the extension.
+    held: int
+
+
+def extend_overfull_bars(page: Page,
+                         max_factor: float = 2.0
+                         ) -> Tuple[List[BarExtension], List[BarExtension]]:
+    """Lengthen, page-wide, bars whose content overruns their meter.
+
+    Runs after :func:`reconcile_meter`: that one handles content that fits the
+    page meter under a wrong declaration; this one handles content that fits
+    no declared bar at all -- homr read more music into the bar than the
+    printed meter holds (a missed barline, an over-long duration).
+
+    The emitter's fallback for such bars drops every note whose onset lies
+    past the barline and truncates the note crossing it -- on the dense pages
+    of the Carpenters book that was 4-13% of a page's notes. Dropping kills
+    real strikes; squeezing the content (scaling onsets to fit) moves every
+    note and pulls the hands off each other's read positions. Both fabricate.
+    The barline is the thing contradicted here, so the barline gives: the bar
+    gets the smallest meter that CONTAINS the content, in the page's own
+    beat-type, and every part at that bar gets it too -- the parts stay
+    bar-aligned and no note moves or dies. Silent bars take the new meter
+    as well, so a tacet part's timeline keeps pace with the part that
+    overflowed.
+
+    Bars needing more than ``max_factor`` times the page meter are left
+    alone: content of several bar-lengths is a misread beyond repair, and
+    dressing it in a nine-beat time signature would be fiction wearing a
+    label. They come back as unrepairable so the caller can report them and
+    the emitter's drop still stands, visibly.
+
+    Returns ``(extended, unrepairable)`` in bar order.
+    """
+    target = (page.beats, page.beat_type)
+    target_length = page.divisions * page.beats * 4 // page.beat_type
+    cap = int(target_length * max_factor)
+    widest: Dict[int, int] = {}
+    for part in page.parts:
+        for measure in part.measures:
+            extent = measure_extent(measure)
+            if extent > widest.get(measure.number, 0):
+                widest[measure.number] = extent
+
+    extended: List[BarExtension] = []
+    unrepairable: List[BarExtension] = []
+    for number in sorted(widest):
+        needed = widest[number]
+        if needed <= target_length:
+            continue
+        if needed > cap:
+            unrepairable.append(BarExtension(number, target, target,
+                                             needed, target_length))
+            continue
+        # Smallest beat count, in the page's beat-type, whose bar holds the
+        # content: ceil(needed * beat_type / (divisions * 4)).
+        beats = -(-needed * page.beat_type // (page.divisions * 4))
+        now = (beats, page.beat_type)
+        for part in page.parts:
+            for measure in part.measures:
+                if measure.number == number:
+                    measure.beats, measure.beat_type = now
+        extended.append(BarExtension(number, target, now,
+                                     needed, target_length))
+    return extended, unrepairable
+
+
+def format_bar_extensions(extended: List[BarExtension],
+                          unrepairable: List[BarExtension]) -> str:
+    """One line per bar: what was lengthened, and what could not be."""
+    lines: List[str] = []
+    if extended:
+        lines.append("bar(s) lengthened page-wide so overrunning content "
+                     "survives (nothing moves; the barline gives instead):")
+        for e in extended:
+            lines.append("  measure %d: %d/%d -> %d/%d "
+                         "(content needs %d ticks, the bar held %d)"
+                         % (e.measure, e.was[0], e.was[1],
+                            e.now[0], e.now[1], e.needed, e.held))
+    if unrepairable:
+        lines.append("bar(s) whose content overruns even the lengthened "
+                     "limit -- left alone; the emitter still drops what "
+                     "lies past their barline:")
+        for e in unrepairable:
+            lines.append("  measure %d: content needs %d ticks, the page "
+                         "bar holds %d" % (e.measure, e.needed, e.held))
+    return "\n".join(lines)

@@ -61,15 +61,28 @@ def _renumber(measures, start):
     return out
 
 
-def _rest_run(count, model):
-    """`count` whole-measure rests inheriting meter/key/clef from `model`."""
-    beats = model.beats if model else 4
-    bt = model.beat_type if model else 4
-    fifths = model.key_fifths if model else 0
-    clef = model.clef if model else ("G", 2)
-    return [Measure(number=0, divisions=GLOBAL_DIVISIONS, beats=beats,
-                    beat_type=bt, key_fifths=fifths, clef=clef, is_empty=True)
-            for _ in range(count)]
+def _rest_run(count, models):
+    """`count` whole-measure rests, each inheriting meter/key/clef from the
+    template at its position in `models`.
+
+    `models` is a page's real measures (any full-width part of that page
+    shows the same bar lengths). Position matters: a bar lengthened to hold
+    overrunning content must be padded as THAT length -- inheriting one
+    fixed meter for every bar would shrink the extended bars and desync the
+    parts from there on.
+    """
+    out = []
+    for i in range(count):
+        m = models[i] if models and i < len(models) else (
+            models[-1] if models else None)
+        out.append(Measure(
+            number=0, divisions=GLOBAL_DIVISIONS,
+            beats=m.beats if m else 4,
+            beat_type=m.beat_type if m else 4,
+            key_fifths=m.key_fifths if m else 0,
+            clef=m.clef if m else ("G", 2),
+            is_empty=True))
+    return out
 
 
 def load_page(staff_dir, stem):
@@ -94,10 +107,16 @@ def load_page(staff_dir, stem):
             clef_maps[p.name] = dict(p.clef_by_staff)
         width = max(width, len(p.measures))
     # Defensive pad: emit_page already equalised, but a short part here would
-    # silently misalign the whole song, so top it up to the page width.
+    # silently misalign the whole song, so top it up to the page width. The
+    # pad bars inherit per-position meters from a full-width sibling so a
+    # lengthened bar stays lengthened.
     for name, ms in by_name.items():
         if len(ms) < width:
-            by_name[name] = ms + _rest_run(width - len(ms), ms[-1] if ms else None)
+            sibling = next((v for k, v in by_name.items()
+                            if k != name and len(v) == width), None)
+            by_name[name] = ms + _rest_run(
+                width - len(ms),
+                sibling[len(ms):] if sibling else None)
     return by_name, width, clef_maps
 
 
@@ -129,20 +148,20 @@ def stitch_song(staff_dir, title, stems, missing_report):
 
     names = sorted(all_names, key=_order_key)
     canon = {n: [] for n in names}
-    model = {}
-    # model = a real measure to inherit meter/key/clef from, per part
-    for by_name, _w in pages:
-        for n in names:
-            if n in by_name and by_name[n] and n not in model:
-                model[n] = by_name[n][-1]
 
     offset = 0
     for by_name, width in pages:
+        # Every part on an assembled page carries the same bar lengths, so a
+        # full-width part's measures are this page's meter profile -- the
+        # template for a missing part's rest-run. Inheriting a fixed meter
+        # instead (the old per-part `model`) padded extended bars back to the
+        # page meter and desynced the tacet part from there on.
+        profile = next((v for v in by_name.values() if len(v) == width), None)
         for n in names:
             if n in by_name:
                 canon[n] += _renumber(by_name[n], offset + 1)
             else:
-                canon[n] += _rest_run(width, model.get(n))
+                canon[n] += _rest_run(width, profile)
         offset += width
 
     parts = []

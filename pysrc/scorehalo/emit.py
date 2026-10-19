@@ -424,8 +424,18 @@ def _emit_measure(meas: Measure, indent: str, with_attributes: bool = False,
                 if dur <= 0:
                     dropped += 1
                     continue
+                # A full-bar rest whose duration names no standard note value
+                # (a lengthened bar pads to e.g. 120 ticks) would be written
+                # as an invented tuplet -- whole x 4:5 -- and MuseScore rejects
+                # <time-modification> on a rest outright (rc=40). A full-bar
+                # rest has a first-class form anyway: measure="yes", which is
+                # how the empty-bar path writes it (at any duration).
+                full_bar_rest = (
+                    n.is_rest and onset == 0 and dur == total
+                    and bool(_type_for(dur, n.tuplet)[2]))
                 lines.extend(_emit_note(n, pad, duration=dur,
-                                        chord_tone=(i > 0)))
+                                        chord_tone=(i > 0),
+                                        measure_rest=full_bar_rest))
                 if dur < n.duration:
                     dropped += 1
             cursor = onset + min(notes[0].duration, room)
@@ -475,7 +485,8 @@ def _apply_voices(meas: Measure, voices: Dict[Tuple[int, int], int]) -> Measure:
 
 
 def _emit_note(n: Note, pad: str, duration: Optional[int] = None,
-               chord_tone: bool = False) -> List[str]:
+               chord_tone: bool = False,
+               measure_rest: bool = False) -> List[str]:
     """Emit one note head.
 
     ``duration`` overrides the graph's own value. The override is not
@@ -489,7 +500,13 @@ def _emit_note(n: Note, pad: str, duration: Optional[int] = None,
     if chord_tone:
         out.append("%s  <chord/>" % pad)
     if n.is_rest:
-        out.append("%s  <rest/>" % pad)
+        if measure_rest:
+            # First-class form of a rest that fills the bar: no note value
+            # for an importer to second-guess (an invented tuplet on a rest
+            # is what MuseScore rejects with rc=40).
+            out.append('%s  <rest measure="yes"/>' % pad)
+        else:
+            out.append("%s  <rest/>" % pad)
     else:
         out.append("%s  <pitch>" % pad)
         out.append("%s    <step>%s</step>" % (pad, n.pitch.step))
@@ -508,15 +525,16 @@ def _emit_note(n: Note, pad: str, duration: Optional[int] = None,
     if n.tie:
         out.append('%s  <tie type="%s"/>' % (pad, n.tie))
     out.append("%s  <voice>%d</voice>" % (pad, n.voice))
-    name, dots, actual, normal = _type_for(dur, n.tuplet)
-    out.append("%s  <type>%s</type>" % (pad, name))
-    for _ in range(dots):
-        out.append("%s  <dot/>" % pad)
-    if actual:
-        out.append("%s  <time-modification>" % pad)
-        out.append("%s    <actual-notes>%d</actual-notes>" % (pad, actual))
-        out.append("%s    <normal-notes>%d</normal-notes>" % (pad, normal))
-        out.append("%s  </time-modification>" % pad)
+    if not measure_rest:
+        name, dots, actual, normal = _type_for(dur, n.tuplet)
+        out.append("%s  <type>%s</type>" % (pad, name))
+        for _ in range(dots):
+            out.append("%s  <dot/>" % pad)
+        if actual:
+            out.append("%s  <time-modification>" % pad)
+            out.append("%s    <actual-notes>%d</actual-notes>" % (pad, actual))
+            out.append("%s    <normal-notes>%d</normal-notes>" % (pad, normal))
+            out.append("%s  </time-modification>" % pad)
     out.append("%s  <staff>%d</staff>" % (pad, n.staff))
     if n.slur:
         # <notations> is the last thing before </note> in the MusicXML content
@@ -597,21 +615,28 @@ def emit_page(page: Page) -> str:
         for number, staff, clef in getattr(part, "clef_changes", None) or []:
             changes.setdefault(number, {})[staff] = clef
         in_force = dict(getattr(part, "clef_by_staff", None) or {})
+        in_meter: Optional[Tuple[int, int]] = None
         for j, meas in enumerate(part.measures):
             if meas.number in changes:
                 in_force.update(changes[meas.number])
             change_here = meas.number in changes
+            # A bar whose meter was lengthened to hold overrunning content
+            # (scorehalo.meter.extend_overfull_bars) must restate <time> --
+            # including in SILENT bars, so a tacet part's timeline stays
+            # aligned with the part that overflowed.
+            meter_now = (meas.beats, meas.beat_type)
+            meter_changed = in_meter is not None and meter_now != in_meter
+            in_meter = meter_now
             if meas.is_empty:
                 out.append('    <measure number="%d">' % meas.number)
-                if j == 0 or change_here:
+                if j == 0 or change_here or meter_changed:
                     # Only the first bar declares: <divisions> is mandatory
                     # there (every later duration is read against it) and is
                     # inherited after that. Restating <time>/<key>/<clef> in
                     # EVERY padded bar is what put a second 4/4 at the right
                     # end of the top system -- renderers print the signatures
-                    # they are shown, and the engraver caught it. Assembled
-                    # pages are stamped page-wide (assemble_page), so nothing
-                    # mid-part changes while the bars are silent.
+                    # they are shown, and the engraver caught it. Meter
+                    # changes are restated deliberately (see above).
                     out.extend(_attributes(meas, "      ", part, in_force))
                 total = _bar_duration(meas)
                 if len(in_force) > 1:
@@ -643,7 +668,8 @@ def emit_page(page: Page) -> str:
                 continue
             body, lost = _emit_measure(meas, "   ", part=part,
                                        voices=voices,
-                                       with_attributes=(j == 0 or change_here),
+                                       with_attributes=(j == 0 or change_here
+                                                        or meter_changed),
                                        clef_by_staff=in_force)
             out.extend(body)
             clamped += lost

@@ -46,7 +46,9 @@ import numpy as np  # noqa: E402
 from scorehalo.brace import brace_groups  # noqa: E402
 from scorehalo.emit import GLOBAL_DIVISIONS, emit_page, parse_part  # noqa: E402
 from scorehalo.grouping import assemble_page  # noqa: E402
-from scorehalo.meter import format_overrides, reconcile_meter  # noqa: E402
+from scorehalo.meter import (extend_overfull_bars,  # noqa: E402
+                             format_bar_extensions, format_overrides,
+                             reconcile_meter)
 
 
 def _natural_key(path):
@@ -226,6 +228,15 @@ def main():
     overrides = reconcile_meter(page)
     if overrides:
         print("  " + format_overrides(overrides).replace("\n", "\n  "))
+
+    # homr sometimes writes a bar longer than the printed meter holds.
+    # Reconcile can only unify declarations; this extends the barline
+    # itself (page-wide) so the overrunning content survives instead of
+    # being dropped at the barline.
+    extended, unrepairable = extend_overfull_bars(page)
+    if extended or unrepairable:
+        print("  " + format_bar_extensions(extended,
+                                           unrepairable).replace("\n", "\n  "))
 
     # The engraver wants the voice stave GONE from the two-staff intro
     # system. Dropping her leading bars was tried and MEASURED to be wrong:

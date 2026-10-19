@@ -38,8 +38,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pysrc"))
 
 from scorehalo.emit import GLOBAL_DIVISIONS, emit_page, parse_part  # noqa: E402
 from scorehalo.graph import Measure, Page, Part  # noqa: E402
-from scorehalo.meter import (format_overrides, reconcile_meter,  # noqa: E402
-                             resolve_page_meter)
+from scorehalo.meter import (extend_overfull_bars,  # noqa: E402
+                             format_bar_extensions, format_overrides,
+                             reconcile_meter, resolve_page_meter)
 
 
 def main():
@@ -114,6 +115,14 @@ def build_one(system_dir, stem, out):
     overrides = reconcile_meter(page)
     if overrides:
         print("  " + format_overrides(overrides).replace("\n", "\n  "))
+
+    # Bars homr wrote LONGER than the page meter (missed barline, over-long
+    # duration) get the barline extended instead of losing their tail notes
+    # at emit. See scorehalo.meter.extend_overfull_bars.
+    extended, unrepairable = extend_overfull_bars(page)
+    if extended or unrepairable:
+        print("  " + format_bar_extensions(extended,
+                                           unrepairable).replace("\n", "\n  "))
 
     xml = emit_page(page)
     with open(out, "w", encoding="utf-8") as fh:
