@@ -36,9 +36,13 @@ def run_omr_sheet_verify(img_path):
 
 
 def run_omr_sheet_write(img_path, out_dir, target_interline=21):
+    """`omr-sheet write` takes an output FILE (-o/--output) and --target, not a
+    directory, so the corrected image is named after its source and interline."""
+    out_path = Path(out_dir) / f"{Path(img_path).stem}_il{target_interline}.png"
     try:
-        result = subprocess.run(['omr-sheet', 'write', str(img_path), '--out', str(out_dir), 
-                                 '--target-interline', str(target_interline)],
+        result = subprocess.run(['omr-sheet', 'write', str(img_path),
+                                 '-o', str(out_path),
+                                 '--target', str(target_interline)],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               timeout=300)
         out = result.stdout.decode() + result.stderr.decode()

@@ -282,12 +282,15 @@ description:
 - `scripts/pdf_exact.py` — the CLI over the above; today it exits 1 with
   "pymupdf not available".
 - `scripts/omr_grade_loop.py` — the render → OMR → audit → tune loop sketched in
-  earlier work: it walks a DPI ladder (150/300/450/600) and records Audiveris
-  acceptance per step, but its `omr-sheet write` call passes flags that do not
-  exist (`--out`, `--target-interline`; the real ones are `-o/--output` and
-  `--target`), so the write half never succeeds, and the audit and tune halves
-  are stubs — truth pitches are counted but never compared, and nothing is ever
-  adjusted.
+  earlier work: it walks a DPI ladder (150/300/450/600), records Audiveris
+  acceptance per step, and writes the corrected page at the target interline
+  (2026-10-23: page 19 at 300 DPI → `ACCEPTED by Audiveris (interline=20px)`,
+  image written). Its earlier `--out`/`--target-interline` flags did not exist —
+  the real ones are `-o/--output` and `--target` — so the write half never ran;
+  that is fixed. **The audit and tune halves are still stubs:** truth pitches are
+  counted but never compared, nothing is ever adjusted, and `parse_omr_grades`
+  has no input, because `omr-sheet write` only verifies at `-step SCALE` and
+  never exports a `.omr` for grades to be read from.
 
 Treat them as notes toward a future exact-PDF path. They are listed here so the
 next reader does not mistake them for working features.
