@@ -259,6 +259,39 @@ degradation, so this is the easy end of the range, not real-book accuracy.
 - `tests/`  **491 unit tests** — `.venv/bin/python -m pytest tests/ -q`
 - `data/out-test/` example output on "Carpenters Gold Songbook 1972" pages 20-22
 
+### Experimental: direct PDF geometry (not wired)
+
+Six files from 2026-10-20 sketch a different road: read MusicXML straight out of
+a PDF's vector geometry instead of running homr over rendered pixels. They are
+prototypes kept for the record, and **no pipeline uses them** — nothing imports
+them, no test covers them, and each one is known to fall short of its own
+description:
+
+- `pysrc/scorehalo/pdf_geometry.py` — staff lines, barlines and noteheads from
+  PyMuPDF drawing commands. Requires `pymupdf`, which this repo does not
+  install; the shipping renderer is pypdfium2, so this module raises
+  `RuntimeError("pymupdf not available")` in the project venv.
+- `pysrc/scorehalo/pdf_to_musicxml.py` — geometry to MusicXML, and the reason
+  this stays experimental: it emits one `<part>` per staff rather than per
+  brace group (so the part list and the parts disagree on any page with more
+  than one system), caps a bar at four notes, reads page 0 only, and writes
+  every note as a quarter. It is a shape, not a transcription.
+- `pysrc/scorehalo/raster_geometry.py`, `pysrc/scorehalo/scanned_constraints.py`
+  — raster-side helpers toward the same goal (system/staff geometry from a
+  scanned page, snapping recognition output to printed system breaks).
+- `scripts/pdf_exact.py` — the CLI over the above; today it exits 1 with
+  "pymupdf not available".
+- `scripts/omr_grade_loop.py` — the render → OMR → audit → tune loop sketched in
+  earlier work: it walks a DPI ladder (150/300/450/600) and records Audiveris
+  acceptance per step, but its `omr-sheet write` call passes flags that do not
+  exist (`--out`, `--target-interline`; the real ones are `-o/--output` and
+  `--target`), so the write half never succeeds, and the audit and tune halves
+  are stubs — truth pitches are counted but never compared, and nothing is ever
+  adjusted.
+
+Treat them as notes toward a future exact-PDF path. They are listed here so the
+next reader does not mistake them for working features.
+
 ## Notes
 
 - Backend: homr (AGPL-3.0), chosen because it is camera-photo/degredation
