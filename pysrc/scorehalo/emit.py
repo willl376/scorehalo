@@ -550,8 +550,41 @@ DOCTYPE = ('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 '
            'Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">')
 
 
+def _declare_every_used_staff(page: Page) -> None:
+    """Make each part's clef map cover the staves its notes actually land on.
+
+    ``_attributes`` writes ``<staves>`` only when the part knows more than one
+    staff's clef, so a part whose notes carry ``<staff>2</staff>`` but whose
+    clef map holds staff 1 alone published as a one-staff part with notes on a
+    staff that was never declared. MuseScore still imports that (it silently
+    invents the second staff), which is why it went unnoticed; a strict reader
+    is entitled to reject it, and ``validate_musicxml.py`` flags it -- one page
+    of the I-Just-Fall run produced exactly this on bars 34-35.
+
+    The role grouping can put a merged region on staff 2 of a part the brace
+    logic called single-staff; that is a recognition question, not an emitter
+    question. What the emitter owes the format is a declaration that matches
+    the notes it writes, so the missing staffs inherit the part's primary clef
+    -- the same clef a reader would assume -- and no note is moved or dropped.
+    """
+    for part in page.parts:
+        used = {n.staff for m in part.measures for n in m.notes}
+        if len(used) < 2:
+            continue
+        clefs = dict(getattr(part, "clef_by_staff", None) or {})
+        if clefs:
+            primary = clefs[min(clefs)]
+        else:
+            scalars = [m.clef for m in part.measures if m.clef]
+            primary = scalars[0] if scalars else ("G", 2)
+        for staff in sorted(used):
+            clefs.setdefault(staff, primary)
+        part.clef_by_staff = clefs
+
+
 def emit_page(page: Page) -> str:
     """Render the graph as MusicXML with one consistent musical context."""
+    _declare_every_used_staff(page)
     out = ['%s\n<score-partwise version="4.0">' % DOCTYPE]
     work = ET.Element("work")
     ET.SubElement(work, "work-title").text = page.id
