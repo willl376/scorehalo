@@ -566,6 +566,14 @@ def _declare_every_used_staff(page: Page) -> None:
     question. What the emitter owes the format is a declaration that matches
     the notes it writes, so the missing staffs inherit the part's primary clef
     -- the same clef a reader would assume -- and no note is moved or dropped.
+
+    The fill runs over ``1..max(used)`` rather than just the used numbers
+    because ``<staves>`` is a COUNT and ``<staff>`` values are positions within
+    it: notes on staves 1 and 3 with a two-entry map would otherwise declare
+    "two staves" and then name staff 3, which no reader can lay out. The gap
+    staff is declared (with no notes on it) instead of renumbering the notes,
+    because the staff number is page geometry and the note keeps its pixel
+    provenance.
     """
     for part in page.parts:
         used = {n.staff for m in part.measures for n in m.notes}
@@ -577,7 +585,7 @@ def _declare_every_used_staff(page: Page) -> None:
         else:
             scalars = [m.clef for m in part.measures if m.clef]
             primary = scalars[0] if scalars else ("G", 2)
-        for staff in sorted(used):
+        for staff in range(1, max(used) + 1):
             clefs.setdefault(staff, primary)
         part.clef_by_staff = clefs
 
