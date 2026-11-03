@@ -1,20 +1,37 @@
-"""Recognise every detected staff on every converted page, in parallel.
+"""RECOVERY CANDIDATE -- isolated attempts and checked resume identity.
 
-The layout detector is now geometrically trustworthy (see validate_layout.py:
-167 staves across 16 pages, 3 benign outliers, zero hallucinations), so the
-remaining bottleneck is homr at roughly 75s per staff. 167 staves on 4 cores is
-about an hour, so this runs a process pool with one task per staff and appends
-each result to a JSONL file as it lands -- a crash or a reboot costs at most one
-staff, not the whole run.
+Repairs, each demonstrated by tests/t6_resume.py or by reading engine.py:
 
-Page analysis is done ONCE in the parent: the deskewed page image and the staff
-boxes are cached to disk, so the workers only crop and run homr.
-
-Usage:
-  python scripts/per_staff_all.py data/out-band --out data/out-perstaff -j 4
+  1. RESUME ONLY VERIFIED SUCCESSES.  The old code added every JSONL record to
+     `done`, so a timeout / empty crop / engine crash was skipped forever and
+     the hole silently survived into the assembled score.  Now a task is only
+     "done" if ok is true AND its retained XML still exists on disk.
+     --retry-failed is therefore the default; --skip-failed restores the old
+     behaviour explicitly if a run genuinely wants it.
+  2. THE WHOLE WORKER IS PROTECTED.  The old try/except wrapped only run_homr;
+     a corrupt boxes.json, an unreadable deskew PNG, a bad staff index, or an
+     XML copy failure escaped and could take the pool down.
+  3. PER-TASK ENGINE DIRECTORY.  run_homr stages <basename>_in.png and names
+     the result <basename>.musicxml, so crops are unique and this is not a
+     live race today -- but it becomes one the moment the crop name changes.
+     Isolation costs nothing: homr/<page>/s<NN>.
+  4. JSONL IS REPAIRED, NOT ASSUMED.  A truncated final line (power cut) used
+     to be tolerated at startup and then crash the summary, or worse, swallow
+     the next record appended after it.  We truncate the partial tail to the
+     last newline, keep it as *.damaged, and report malformed interior lines.
+  5. SUMMARY COUNTS CURRENT TASKS ONCE.  Expected / verified / failed / missing
+     are separate numbers, and success is labelled "tasks completed with
+     parseable output" rather than "staves recognised".
+  6. ARGUMENTS AND GEOMETRY ARE VALIDATED, and the crop box + engine log are
+     recorded so a result can be reproduced without guessing.
 """
 
 import argparse
+import hashlib
+import shutil
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 import json
 import os
 import sys
@@ -24,26 +41,171 @@ from multiprocessing import Pool
 import numpy as np
 from PIL import Image
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "pysrc"))
-sys.path.insert(0, HERE)
+ROOT = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "pysrc/scorehalo").is_dir()
+    and (p / "scripts/make_fixture.py").is_file()
+)
+sys.path.insert(0, str(ROOT / "pysrc"))
+sys.path.insert(0, str(ROOT / "scripts"))
 from scorehalo.layout import analyze_page  # noqa: E402
 from scorehalo.engine import run_homr  # noqa: E402
-from crop_probe import xml_stats  # noqa: E402
+
+
+def xml_stats(path):
+    """Structural statistics, never a claim of transcription accuracy."""
+    if not path or not os.path.isfile(path):
+        return {"status": "missing"}
+    try:
+        root = ET.parse(path).getroot()
+        tag = root.tag
+        namespace = tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+        def q(name):
+            return "{%s}%s" % (namespace, name) if namespace else name
+        if tag != q("score-partwise"):
+            raise ValueError("expected score-partwise MusicXML")
+        parts = root.findall(q("part"))
+        measures = [
+            m for part in parts for m in part.findall(q("measure"))
+        ]
+        if not parts or not measures:
+            raise ValueError("no musical parts or measures")
+        notes = [
+            n for measure in measures for n in measure.findall(q("note"))
+        ]
+        pitched = sum(n.find(q("pitch")) is not None for n in notes)
+        rests = sum(n.find(q("rest")) is not None for n in notes)
+        return {
+            "status": "ok",
+            "parts": len(parts),
+            "measures": len(measures),
+            "note_elements": len(notes),
+            "pitched_notes": pitched,
+            "rests": rests,
+            "has_pitched_notes": pitched > 0,
+            "notes": len(notes),
+        }
+    except (OSError, ET.ParseError, ValueError) as exc:
+        return {"status": "invalid", "why": str(exc)}
+
+
+def retained_ok(record, out):
+    if record.get("ok") is not True or record.get("rc") != 0:
+        return False
+    kept = record.get("kept")
+    if not isinstance(kept, str) or not kept:
+        return False
+    base = Path(out).resolve()
+    path = (base / kept).resolve()
+    if base not in path.parents:
+        return False
+    return xml_stats(str(path)).get("status") == "ok"
+
+
+def read_latest(path):
+    latest = {}
+    if not os.path.exists(path):
+        return latest
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("record is not an object")
+                page = record["page"]
+                staff = record["staff"]
+                if not isinstance(page, str) or not page:
+                    raise ValueError("invalid page name")
+                if type(staff) is not int or staff < 1:
+                    raise ValueError("invalid staff number")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f"{path}, line {number}: {exc}") from exc
+            latest[(page, staff)] = record
+    return latest
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_run_identity(args, only):
+    """Fail closed before reusing or rewriting an existing run."""
+    source = Path(args.out_dir).resolve()
+    manifest = source / "manifest.json"
+    with manifest.open(encoding="utf-8") as handle:
+        man = json.load(handle)
+
+    inputs = []
+    seen = set()
+    for page in man["pages"]:
+        if page.get("status") != "ok":
+            continue
+        name = Path(page["image"]).stem
+        if only is not None and name not in only:
+            continue
+        if name in seen:
+            raise ValueError(f"duplicate page stem: {name}")
+        seen.add(name)
+        image = source / "render" / (name + ".png")
+        if not image.is_file():
+            raise ValueError(f"required render missing: {image}")
+        inputs.append([name, file_hash(image)])
+
+    if not inputs:
+        raise ValueError("no matching successful pages with rendered inputs")
+
+    code = {
+        str(p.relative_to(ROOT)): file_hash(p)
+        for p in sorted((ROOT / "pysrc/scorehalo").rglob("*.py"))
+    }
+    identity = {
+        "schema": 3,
+        "source": str(source),
+        "manifest_hash": file_hash(manifest),
+        "inputs": sorted(inputs),
+        "pad_frac": args.pad_frac,
+        "min_staff_lines": args.min_staff_lines,
+        "timeout": args.timeout,
+        "engine_id": args.engine_id,
+        "runner_hash": file_hash(__file__),
+        "project_code": code,
+    }
+
+    out = Path(args.out)
+    marker = out / "resume_identity.json"
+    if marker.exists():
+        previous = json.loads(marker.read_text(encoding="utf-8"))
+        if previous != identity:
+            raise ValueError(
+                "input/configuration identity changed; use a NEW --out folder"
+            )
+    else:
+        if any(out.iterdir()):
+            raise ValueError(
+                "existing output has no matching identity; use a NEW --out folder"
+            )
+        with marker.open("x", encoding="utf-8") as handle:
+            json.dump(identity, handle, indent=2)
+
+
+RESUME_SCHEMA = 3       # bump when a record's meaning changes
 
 
 def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None):
-    """Detect staves once per page; cache deskewed image + staff boxes.
-
-    ``pages`` restricts detection to the named stems (``{"p0022"}``); None
-    means every page in the manifest.  Restricting is what lets one page be
-    re-detected at a different threshold without touching the others.
-    """
+    """Detect staves once per page; cache deskewed image + staff boxes."""
     with open(manifest) as fh:
         man = json.load(fh)
     pages_out = []
+    skipped = []
     for p in man["pages"]:
         if p.get("status") != "ok":
+            skipped.append((p.get("page"), p.get("status")))
             continue
         name = os.path.splitext(os.path.basename(p["image"]))[0]
         if pages is not None and name not in pages:
@@ -51,58 +213,80 @@ def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None):
         rp = os.path.join(render_dir, f"{name}.png")
         if not os.path.exists(rp):
             print(f"  !! missing render {rp} -- skipping")
+            skipped.append((p.get("page"), "render missing"))
             continue
-        gray = np.array(Image.open(rp).convert("L"))
+        with Image.open(rp) as im:
+            gray = np.array(im.convert("L"))
         r = analyze_page(gray, min_staff_lines=min_staff_lines)
         dp = os.path.join(out, f"{name}.deskew.png")
         Image.fromarray(r["deskewed"]).save(dp)
         meta = {"page": name, "deskew": dp, "render": rp,
-                "n_staves": r["n_staves"], "n_systems": r["n_systems"],
+                "n_staves": len(r["staves"]),
+                "n_systems": r["n_systems"],
                 "grouping": [s["n_staves"] for s in r["systems"]],
                 "staff_space": r["staff_space"],
                 "n_slivers_removed": r["n_slivers_removed"],
+                "min_staff_lines": min_staff_lines,
                 "staves": r["staves"]}
         with open(os.path.join(out, f"{name}.boxes.json"), "w") as fh:
             json.dump(meta, fh, indent=2)
         pages_out.append(meta)
-        print(f"  {name}: {r['n_staves']} staves, grouping "
+        print(f"  {name}: {meta['n_staves']} staves, grouping "
               f"{'+'.join(map(str, meta['grouping']))}, "
               f"{r['n_slivers_removed']} slivers removed")
-    return pages_out
+    return pages_out, skipped
 
 
 def work(task):
     name, idx, out, pad, timeout = task
+    rec = {"page": name, "staff": idx + 1, "schema": RESUME_SCHEMA}
+    try:
+        return _work(rec, name, idx, out, pad, timeout)
+    except Exception as exc:          # a worker must never take down the pool
+        rec.update(ok=False, why=f"{type(exc).__name__}: {exc}")
+        return rec
+
+
+def _work(rec, name, idx, out, pad, timeout):
     with open(os.path.join(out, f"{name}.boxes.json")) as fh:
         meta = json.load(fh)
-    desk = np.array(Image.open(meta["deskew"]).convert("L"))
-    st = meta["staves"][idx]
+    staves = meta["staves"]
+    if not 0 <= idx < len(staves):
+        rec.update(ok=False, why=f"staff index {idx} outside 0..{len(staves) - 1}")
+        return rec
+    st = staves[idx]
+    with Image.open(meta["deskew"]) as im:
+        desk = np.array(im.convert("L"))
     h, w = desk.shape
-    # identical crop geometry to crop_probe.py, which is what proved 8/8 on p0020
     pv, ph = h * pad * 0.5, w * pad
     t = int(max(0, st["y_top"] - pv))
     b = int(min(h, st["y_bot"] + pv))
     l = int(max(0, st["x0"] - ph))
     rr = int(min(w, st["x1"] + ph))
-    rec = {"page": name, "staff": idx + 1, "n_lines": st["n_lines"],
-           "spacing": st["spacing"], "resid": st["resid"], "width": st["width"]}
+    rec.update(n_lines=st["n_lines"], spacing=st["spacing"],
+               resid=st["resid"], width=st["width"],
+               crop_box=[l, t, rr, b])
     if b - t < 20 or rr - l < 20:
         rec.update(ok=False, why="crop too small")
         return rec
+
     crop = desk[t:b, l:rr].copy()
     cp = os.path.join(out, "crops", f"{name}.s{idx + 1}.png")
     os.makedirs(os.path.dirname(cp), exist_ok=True)
     Image.fromarray(crop).save(cp)
     rec["crop_px"] = [int(rr - l), int(b - t)]
-    try:
-        xml, log, rc = run_homr(cp, os.path.join(out, "homr", name),
-                                timeout=timeout)
-    except Exception as e:  # a worker must never take down the pool
-        rec.update(ok=False, why=f"{type(e).__name__}: {e}")
-        return rec
+
+    task_dir = os.path.join(out, "homr", name, f"s{idx + 1:03d}")
+    os.makedirs(task_dir, exist_ok=True)
+    engine_out = tempfile.mkdtemp(prefix="attempt-", dir=task_dir)
+    xml, log, rc = run_homr(cp, engine_out, timeout=timeout)
+    rec["log"] = os.path.relpath(log, out) if log else None
     stats = xml_stats(xml)
-    rec.update(rc=rc, stats=stats, ok=(rc == 0 and stats is not None))
-    if xml:
+    # ok == the task produced parseable MusicXML.  That is NOT accuracy;
+    # the summary says "parseable output", never "correctly recognised".
+    rec.update(rc=rc, stats=stats,
+               ok=(rc == 0 and stats.get("status") == "ok"))
+    if rec["ok"]:
         rec["xml"] = os.path.relpath(xml, out)
         d = os.path.join(out, "xml", f"{name}.s{idx + 1}.musicxml")
         os.makedirs(os.path.dirname(d), exist_ok=True)
@@ -112,22 +296,93 @@ def work(task):
     return rec
 
 
+def repair_jsonl(path):
+    """Preserve valid final JSON; archive and remove only a torn final line."""
+    if not os.path.exists(path):
+        return []
+    raw = Path(path).read_bytes()
+    if not raw:
+        return []
+
+    repaired = raw
+    tail = None
+    if not raw.endswith(b"\n"):
+        cut = raw.rfind(b"\n") + 1
+        last = raw[cut:]
+        try:
+            json.loads(last.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            repaired = raw[:cut]
+            tail = last
+        else:
+            repaired = raw + b"\n"
+
+    for number, line in enumerate(repaired.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line.decode("utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("record is not an object")
+            if not isinstance(value.get("page"), str) or not value["page"]:
+                raise ValueError("invalid page")
+            if type(value.get("staff")) is not int or value["staff"] < 1:
+                raise ValueError("invalid staff")
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError(
+                f"refusing malformed log: {path}, line {number}: {exc}"
+            ) from exc
+
+    if repaired != raw:
+        backup = path + ".before-repair-" + str(time.time_ns())
+        shutil.copy2(path, backup)
+        if tail is not None:
+            Path(backup + ".tail").write_bytes(tail)
+        with open(path, "wb") as handle:
+            handle.write(repaired)
+            handle.flush()
+            os.fsync(handle.fileno())
+        print(f"  log repaired; original preserved as {backup}")
+    return []
+
+
+def already_done(path, require_output=True):
+    latest = read_latest(path)
+    out = os.path.dirname(path)
+    done = {
+        key: record for key, record in latest.items()
+        if retained_ok(record, out)
+    }
+    return done, len(latest) - len(done)
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description="recognise every detected staff")
     ap.add_argument("out_dir", help="the converted run, e.g. data/out-band")
     ap.add_argument("--out", default="data/out-perstaff")
     ap.add_argument("-j", "--jobs", type=int, default=4)
     ap.add_argument("--pad-frac", type=float, default=0.12)
     ap.add_argument("--timeout", type=int, default=900)
-    ap.add_argument("--min-staff-lines", type=int, default=5,
-                    help="lines a candidate must have to count as a staff "
-                         "(lower to admit staves whose rules are interrupted)")
-    ap.add_argument("--pages", default="",
-                    help="comma-separated page numbers to restrict to "
-                         "(e.g. 22); empty means every page")
+    ap.add_argument("--min-staff-lines", type=int, default=5)
+    ap.add_argument("--pages", default="")
+    ap.add_argument("--engine-id", required=True,
+                    help="stable model/environment label; change it "
+                         "when models or the engine environment change")
     ap.add_argument("--force", action="store_true",
-                    help="re-run staves already present in the JSONL")
+                    help="re-run every staff, ignoring the JSONL")
+    ap.add_argument("--skip-failed", action="store_true",
+                    help="do NOT retry staff whose record says ok=false "
+                         "(the old behaviour; leaves holes in the score)")
     args = ap.parse_args(argv)
+
+    if args.jobs < 1:
+        ap.error("-j/--jobs must be >= 1")
+    if args.timeout <= 0:
+        ap.error("--timeout must be positive")
+    if not np.isfinite(args.pad_frac) or args.pad_frac < 0:
+        ap.error("--pad-frac must be finite and non-negative")
+    if args.min_staff_lines < 1:
+        ap.error("--min-staff-lines must be >= 1")
 
     only = None
     if args.pages.strip():
@@ -137,25 +392,29 @@ def main(argv=None):
     render_dir = os.path.join(args.out_dir, "render")
     manifest = os.path.join(args.out_dir, "manifest.json")
     jl = os.path.join(args.out, "per_staff.jsonl")
+    verify_run_identity(args, only)
+    repair_jsonl(jl)
 
-    done = set()
-    if os.path.exists(jl) and not args.force:
-        for line in open(jl):
-            try:
-                r = json.loads(line)
-                done.add((r["page"], r["staff"]))
-            except Exception:
-                pass
+    done, n_failed_hist = already_done(jl, require_output=True)
+    if args.skip_failed:
+        done.update(read_latest(jl))
+    if n_failed_hist and not args.skip_failed:
+        print(f"  {n_failed_hist} previously failed/incomplete staff "
+              f"will be retried (use --skip-failed to keep them)")
 
     print("== analysing pages (once) ==")
-    pages = prep_pages(render_dir, manifest, args.out,
-                       min_staff_lines=args.min_staff_lines, pages=only)
-    total = sum(p["n_staves"] for p in pages)
+    pages, skipped_pages = prep_pages(render_dir, manifest, args.out,
+                                      min_staff_lines=args.min_staff_lines,
+                                      pages=only)
     tasks = [(p["page"], i, args.out, args.pad_frac, args.timeout)
-             for p in pages for i in range(p["n_staves"])]
-    todo = [t for t in tasks if (t[0], t[1] + 1) not in done]
-    print(f"\n== {len(todo)} staves to run ({len(done)} already done, "
-          f"{total} total) on {args.jobs} workers ==\n")
+             for p in pages for i in range(len(p["staves"]))]
+    todo = list(tasks) if args.force else [t for t in tasks
+                                  if (t[0], t[1] + 1) not in done]
+    if not tasks:
+        raise ValueError("no staff tasks detected; inspect layout outputs")
+    print(f"\n== {len(todo)} staff tasks to run; "
+          f"{len(tasks) - len(todo)} not scheduled; "
+          f"{len(tasks)} expected; {args.jobs} workers ==\n")
 
     t0 = time.time()
     n = 0
@@ -163,6 +422,10 @@ def main(argv=None):
         for rec in pool.imap_unordered(work, todo):
             sink.write(json.dumps(rec) + "\n")
             sink.flush()
+            try:
+                os.fsync(sink.fileno())
+            except OSError:
+                pass
             n += 1
             s = rec.get("stats") or {}
             flag = "" if rec.get("ok") else f"  <<< {rec.get('why', 'rc=' + str(rec.get('rc')))}"
@@ -170,28 +433,51 @@ def main(argv=None):
             eta = el / n * (len(todo) - n)
             print(f"  [{n:>3}/{len(todo)}] {rec['page']} s{rec['staff']:<2} "
                   f"rc={rec.get('rc')} parts={s.get('parts')} "
-                  f"staves={s.get('staves')} meas={s.get('measures')} "
+                  f"pitched={s.get('pitched_notes')} meas={s.get('measures')} "
                   f"notes={s.get('notes')}{flag}  "
                   f"[{el / 60:.0f}m elapsed, ~{eta / 60:.0f}m left]", flush=True)
 
+    # Use the same retained-output rule as resume.
+    latest = read_latest(jl)
+
     print("\n== summary ==")
-    recs = [json.loads(x) for x in open(jl)]
-    bypage = {}
-    for r in recs:
-        bypage.setdefault(r["page"], []).append(r)
     tot_ok = tot_notes = 0
-    for pg in sorted(bypage):
-        rs = bypage[pg]
-        ok = [r for r in rs if r.get("ok")]
-        notes = sum((r["stats"] or {}).get("notes", 0) for r in ok)
-        tot_ok += len(ok)
+    missing = []
+    failed = []
+    for p in pages:
+        pg = p["page"]
+        n_exp = len(p["staves"])
+        ok = notes = 0
+        bad = []
+        for i in range(1, n_exp + 1):
+            r = latest.get((pg, i))
+            if r is None:
+                missing.append((pg, i))
+                continue
+            if retained_ok(r, args.out):
+                ok += 1
+                kept_stats = xml_stats(os.path.join(args.out, r["kept"]))
+                notes += kept_stats["note_elements"]
+            else:
+                bad.append(i)
+                failed.append((pg, i, r.get("why") or "rc=%s" % r.get("rc")))
+        tot_ok += ok
         tot_notes += notes
-        bad = [r for r in rs if not r.get("ok")]
-        note = "" if not bad else f"   FAILED: {[r['staff'] for r in bad]}"
-        print(f"  {pg}: {len(ok)}/{len(rs)} ok, {notes} notes{note}")
-    print(f"\n  TOTAL: {tot_ok}/{len(recs)} staves recognised, "
-          f"{tot_notes} notes, {(time.time() - t0) / 60:.1f} min")
-    return 0
+        line = f"  {pg}: {ok}/{n_exp} tasks with parseable output, {notes} notes"
+        if bad:
+            line += f"   FAILED: {bad}"
+        print(line)
+    print(f"\n  TOTAL: {tot_ok}/{len(tasks)} tasks completed with parseable "
+          f"output, {tot_notes} notes, {(time.time() - t0) / 60:.1f} min")
+    if missing:
+        print(f"  MISSING (never produced a record): {len(missing)}  "
+              f"{missing[:10]}")
+    if failed:
+        print(f"  FAILED: {len(failed)}  {failed[:10]}")
+    if skipped_pages:
+        print(f"  pages not analysed: {len(skipped_pages)}  {skipped_pages[:10]}")
+    print("  NOTE: 'parseable output' is an execution status, not accuracy.")
+    return 1 if (missing or failed) else 0
 
 
 if __name__ == "__main__":

@@ -9,26 +9,57 @@ gives a true note-level score against exact ground truth.
 Usage:
     python scripts/make_fixture.py [--out data/fixtures] [--name page001]
                                    [--degrade scan|light|none]
+
+Four defects were fixed after measurement (see data/perplexity-probe/REPORT.md):
+
+1. Duration -> notation is a TABLE (type name + dot count), not a parity test.
+   `dotted = (beats*2) % 2 == 1` marked a half-beat eighth as dotted (3/8)
+   while writing <duration>2</duration>, and never marked a dotted eighth at
+   all.  Every half-beat note in MELODY was affected.
+2. Note children are emitted in MusicXML order:
+      duration, tie, instrument, voice, type, dot*, accidental, ..., staff,
+      beam*, notations*
+   The old order put <dot/> before <voice>/<type> and <notations> before them.
+3. Degradation can actually produce JPEG artefacts: Pillow picks the encoder
+   from the FILENAME, so `im.save("x.png", quality=38)` wrote a lossless PNG
+   with the quality argument ignored.  We round-trip through BytesIO/JPEG and
+   then save PNG.
+4. render_truth_pdf refuses to accept a PDF it did not just produce: it renders
+   to a fresh temp path, verifies a successful return code AND that the file
+   opens and has the expected page count, and only then moves it into place.
+   A stale PDF from a previous run can no longer be scored as this run's truth.
+   It also refuses multi-page fixtures, because pdf_to_png only reads page 1
+   while the benchmark scores the whole truth XML.
 """
 
 import argparse
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from fractions import Fraction
+from io import BytesIO
 
 import pypdfium2 as pdfium
 from PIL import Image, ImageEnhance, ImageFilter
 
 DIVISIONS = 4
-TYPE_NAMES = {
-    Fraction(4): "whole", Fraction(3): "half", Fraction(2): "half",
-    Fraction(3, 2): "quarter", Fraction(1): "quarter",
-    Fraction(3, 4): "eighth", Fraction(1, 2): "eighth", Fraction(1, 4): "16th",
+
+# beats -> (written type, number of dots).  One table, one truth.
+NOTE_VALUES = {
+    Fraction(4): ("whole", 0),
+    Fraction(3): ("half", 1),
+    Fraction(2): ("half", 0),
+    Fraction(3, 2): ("quarter", 1),
+    Fraction(1): ("quarter", 0),
+    Fraction(3, 4): ("eighth", 1),
+    Fraction(1, 2): ("eighth", 0),
+    Fraction(1, 4): ("16th", 0),
 }
 
 MELODY = [
@@ -59,11 +90,17 @@ def _pitch(token):
 ACCIDENTAL_NAMES = {1: "sharp", -1: "flat"}
 
 
-def _note_xml(token, beats, staff, voice, tie=False):
+def _note_xml(token, beats, staff, voice, tie_start=False, tie_stop=False):
     beats = Fraction(beats)
-    dur = int(beats * DIVISIONS)
-    dotted = (beats * 2) % 2 == 1
-    type_name = TYPE_NAMES[beats]
+    if beats not in NOTE_VALUES:
+        raise ValueError(f"duration {beats} has no notation in NOTE_VALUES")
+    type_name, dot_count = NOTE_VALUES[beats]
+    dur = beats * DIVISIONS
+    if dur.denominator != 1:
+        raise ValueError(f"duration {beats} is not representable "
+                         f"with divisions={DIVISIONS}")
+    dur = int(dur)
+
     heads = token.split("+")
     blocks = []
     for pos, head in enumerate(heads):
@@ -78,18 +115,34 @@ def _note_xml(token, beats, staff, voice, tie=False):
             if alter:
                 out.append(f"          <alter>{alter}</alter>")
             out += [f"          <octave>{octave}</octave>", "        </pitch>"]
+
         out.append(f"        <duration>{dur}</duration>")
-        if tie:
-            out += ['        <tie type="start"/>', '        <notations><tied type="start"/></notations>']
-        if dotted:
-            out.append("        <dot/>")
+        # sound tie(s) before voice, per the MusicXML note sequence
+        if tie_stop:
+            out.append('        <tie type="stop"/>')
+        if tie_start:
+            out.append('        <tie type="start"/>')
+
         out.append(f"        <voice>{voice}</voice>")
         out.append(f"        <type>{type_name}</type>")
+        out += ["        <dot/>"] * dot_count
+
         if head != "rest":
             _, alter, _octave = _pitch(head)
             if alter in ACCIDENTAL_NAMES:
                 out.append(f'        <accidental>{ACCIDENTAL_NAMES[alter]}</accidental>')
+
         out.append(f"        <staff>{staff}</staff>")
+
+        # notated ties go in <notations>, which is last
+        if tie_start or tie_stop:
+            tied = []
+            if tie_stop:
+                tied.append('<tied type="stop"/>')
+            if tie_start:
+                tied.append('<tied type="start"/>')
+            out.append("        <notations>" + "".join(tied) + "</notations>")
+
         out.append("      </note>")
         blocks.append("\n".join(out))
     return "\n".join(blocks)
@@ -162,59 +215,111 @@ def build_truth_xml(path, measures=4):
     return measures
 
 
-def render_truth_pdf(truth_xml, out_pdf, musescore_bin, timeout=240):
-    binary = musescore_bin or os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable")
-    rc = None
-    for _ in range(3):
+def render_truth_pdf(truth_xml, out_pdf, musescore_bin, timeout=240,
+                     expected_pages=1):
+    """Render, accepting ONLY a PDF this call produced."""
+    binary = (musescore_bin
+              or os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable"))
+    last = None
+    for attempt in range(3):
+        tmpdir = tempfile.mkdtemp(prefix="fixture_render_")
+        tmp_pdf = os.path.join(tmpdir, "truth.pdf")
         try:
-            proc = subprocess.run([binary, "-o", out_pdf, truth_xml], capture_output=True, timeout=timeout)
-            rc = proc.returncode
+            proc = subprocess.run([binary, "-o", tmp_pdf, truth_xml],
+                                  capture_output=True, timeout=timeout)
+            last = proc.returncode
+            if proc.returncode != 0 or not os.path.exists(tmp_pdf):
+                print(f"  [render] attempt {attempt + 1}: rc={proc.returncode} "
+                      f"{(proc.stderr or b'')[-300:]!r}", file=sys.stderr)
+                continue
+            # the PDF must actually open, and match the fixture policy
+            doc = pdfium.PdfDocument(tmp_pdf)
+            try:
+                n_pages = len(doc)
+            finally:
+                doc.close()
+            if expected_pages is not None and n_pages != expected_pages:
+                print(f"  [render] attempt {attempt + 1}: {n_pages} pages, "
+                      f"fixture policy requires {expected_pages} "
+                      f"(pdf_to_png reads page 1 only)", file=sys.stderr)
+                last = f"page count {n_pages} != {expected_pages}"
+                continue
+            shutil.move(tmp_pdf, out_pdf)          # only now is it ours
+            return True, proc.returncode
         except subprocess.TimeoutExpired:
-            rc = "timeout"
-        if os.path.exists(out_pdf) and os.path.getsize(out_pdf) > 1000:
-            return True, rc
+            last = "timeout"
+            print(f"  [render] attempt {attempt + 1}: timeout", file=sys.stderr)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         time.sleep(2)
-    return False, rc
+    return False, last
 
 
 def pdf_to_png(pdf, png, dpi=300):
     doc = pdfium.PdfDocument(pdf)
-    bitmap = doc[0].render(scale=dpi / 72.0)
-    bitmap.to_pil().save(png)
-    doc.close()
+    try:
+        bitmap = doc[0].render(scale=dpi / 72.0)
+        bitmap.to_pil().save(png)
+    finally:
+        doc.close()
+
+
+def jpeg_roundtrip(im, quality):
+    """Encode/decode as JPEG so the artefacts are real, then hand back RGB."""
+    buf = BytesIO()
+    im.save(buf, format="JPEG", quality=quality)
+    buf.seek(0)
+    with Image.open(buf) as decoded:
+        return decoded.convert("RGB")
 
 
 def degrade(png, out_png, mode="scan", seed=7):
-    im = Image.open(png).convert("RGB")
+    if mode not in {"none", "light", "scan"}:
+        raise ValueError(f"unknown degradation mode: {mode}")
+    with Image.open(png) as src:
+        im = src.convert("RGB")
     rng = random.Random(seed)
-    meta = {"mode": mode, "in_size": list(im.size)}
-    if mode == "none":
-        im.save(out_png)
-        meta["out_size"] = list(im.size)
-        return meta
+    meta = {"mode": mode, "seed": seed, "in_size": list(im.size)}
     w, h = im.size
+
+    if mode == "none":
+        im.save(out_png, format="PNG")
+        meta.update(out_size=[w, h], noise_operations=0)
+        return meta
+
     if mode == "scan":
-        scale = 200 / 300.0
-        im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        resample = 200 / 300.0
+        im = im.resize((int(w * resample), int(h * resample)), Image.LANCZOS)
         im = im.resize((w, h), Image.BICUBIC)
-        im = im.filter(ImageFilter.GaussianBlur(radius=0.6))
-        im = ImageEnhance.Contrast(im).enhance(0.86)
-        im = ImageEnhance.Brightness(im).enhance(1.04)
-        im = im.rotate(rng.uniform(-0.35, 0.35), resample=Image.BICUBIC, fillcolor=(255, 255, 255))
+        blur, contrast, brightness, jpeg_q = 0.6, 0.86, 1.04, 38
+        angle = rng.uniform(-0.35, 0.35)
+        im = im.filter(ImageFilter.GaussianBlur(radius=blur))
+        im = ImageEnhance.Contrast(im).enhance(contrast)
+        im = ImageEnhance.Brightness(im).enhance(brightness)
+        im = im.rotate(angle, resample=Image.BICUBIC, fillcolor=(255, 255, 255))
+        # speckle BEFORE the JPEG pass, so the artefacts also bite the noise
         px = im.load()
         dots = int(w * h * 0.0015)
         for _ in range(dots):
             x, y = rng.randrange(w), rng.randrange(h)
             r, g, b = px[x, y]
             n = rng.randint(-26, 26)
-            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
-        im.save(out_png, quality=38)
-        meta["noise_dots"] = dots
+            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)),
+                        max(0, min(255, b + n)))
+        im = jpeg_roundtrip(im, jpeg_q)
+        im.save(out_png, format="PNG")
+        meta.update(noise_operations=dots, rotation_deg=round(angle, 3),
+                    blur_radius=blur, contrast=contrast, brightness=brightness,
+                    resample_ratio=resample, jpeg_quality=jpeg_q)
     else:
-        im = im.filter(ImageFilter.GaussianBlur(radius=0.25))
-        im = ImageEnhance.Contrast(im).enhance(0.97)
-        im.save(out_png, quality=88)
-        meta["noise_dots"] = 0
+        blur, contrast, jpeg_q = 0.25, 0.97, 88
+        im = im.filter(ImageFilter.GaussianBlur(radius=blur))
+        im = ImageEnhance.Contrast(im).enhance(contrast)
+        im = jpeg_roundtrip(im, jpeg_q)
+        im.save(out_png, format="PNG")
+        meta.update(noise_operations=0, blur_radius=blur, contrast=contrast,
+                    jpeg_quality=jpeg_q)
+
     meta["out_size"] = list(im.size)
     return meta
 
@@ -225,8 +330,11 @@ def main():
     ap.add_argument("--name", default="page001")
     ap.add_argument("--measures", type=int, default=4)
     ap.add_argument("--degrade", default="scan", choices=["scan", "light", "none"])
-    ap.add_argument("--musescore", default=os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable"))
+    ap.add_argument("--musescore",
+                    default=os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable"))
     args = ap.parse_args()
+    if args.measures < 1:
+        ap.error("--measures must be positive")
 
     outdir = os.path.abspath(args.out)
     os.makedirs(outdir, exist_ok=True)
@@ -242,7 +350,9 @@ def main():
         return 1
     pdf_to_png(pdf, clean)
     meta = degrade(clean, scan, args.degrade)
-    meta.update({"truth": truth, "pdf": pdf, "clean": clean, "measures": args.measures})
+    meta.update({"truth": truth, "pdf": pdf, "clean": clean,
+                 "measures": args.measures, "render_dpi": 300,
+                 "musescore": args.musescore})
     with open(os.path.join(outdir, f"{args.name}_fixture.json"), "w") as fh:
         json.dump(meta, fh, indent=2)
     print(json.dumps(meta, indent=2))

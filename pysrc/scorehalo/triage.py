@@ -1,14 +1,34 @@
-"""Programmatic page triage: classify page regions + report staff/photo stats.
+"""CANDIDATE (probe only) -- triage with honest horizontal-band measurement.
 
-KISS version of "what is on this page": measure colorfulness, ink density,
-horizontal-line density (staff lines), and rough interline spacing.
+Changes vs pysrc/scorehalo/triage.py:
+  1. Row coverage is a FRACTION OF WIDTH (count_nonzero/w), not a sum of
+     0/255 pixel values.  The old test `rows_sum > w*0.3` silently meant
+     "coverage > 0.118%".
+  2. Bands are located once (starts/stops), so a band's THICKNESS and the
+     GAP BETWEEN BAND CENTRES are two different, correctly-named numbers.
+     The old code measured thickness and called it an interline estimate.
+  3. One-pixel bands are kept (old code dropped every g == 1).
+  4. Keys are named for what they measure.  Legacy keys keep working so
+     preprocess.is_music_page() can be switched over deliberately.
 """
 
 import sys
-import numpy as np
+
 import cv2
+import numpy as np
 
 from .graphics import photo_fraction
+
+# a row counts as a full-width rule when this fraction of it is foreground
+ROW_COVERAGE = 0.25
+
+
+def _bands(row_mask):
+    """(starts, thicknesses, centres) for runs of True in row_mask."""
+    edges = np.diff(np.pad(row_mask.astype(np.int8), (1, 1)))
+    starts = np.flatnonzero(edges == 1)
+    stops = np.flatnonzero(edges == -1)          # exclusive
+    return starts, stops - starts, (starts + stops - 1) / 2.0
 
 
 def triage(path):
@@ -19,50 +39,43 @@ def triage(path):
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # colorfulness
-    r, g, b = rgb[:, :, 0].astype(np.float32), rgb[:, :, 1].astype(np.float32), rgb[:, :, 2].astype(np.float32)
+    # colorfulness (Hasler-Suesstrunk)
+    r, g, b = (rgb[:, :, i].astype(np.float32) for i in range(3))
     rg = np.abs(r - g)
     yb = np.abs((r + g) / 2 - b)
-    colorfulness = float(np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
+    colorfulness = float(np.sqrt(rg.std() ** 2 + yb.std() ** 2)
+                         + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
 
-    # ink density: dark pixels
     dark = (gray < 128)
     ink = float(dark.mean())
 
-    # horizontal line detection (staff lines)
-    thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 45, 15)
-    horiz = cv2.getStructuringElement(cv2.MORPH_RECT, (w // 20, 1))
+    thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                cv2.THRESH_BINARY_INV, 45, 15)
+    kw = max(1, w // 20)
+    horiz = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 1))
     hlines = cv2.morphologyEx(thr, cv2.MORPH_OPEN, horiz)
     line_density = float((hlines > 0).mean())
 
-    # estimate vertical run pattern of long horizontal lines (interline heuristic)
-    rows_sum = hlines.sum(axis=1)
-    row_mask = (rows_sum > w * 0.3).astype(np.uint8)
-    gaps = []
-    start = None
-    for i, v in enumerate(row_mask):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            gaps.append(i - start)
-            start = None
-    if start is not None:
-        gaps.append(h - start)
-    line_thicknesses = [g for g in gaps if g > 1]
-    interline_est = None
-    if len(line_thicknesses) >= 4:
-        interline_est = float(np.mean(sorted(line_thicknesses)[:-1]))  # mean of smaller runs
+    # ---- honest band geometry ------------------------------------------
+    row_coverage = np.count_nonzero(hlines, axis=1) / float(w)
+    starts, thicknesses, centres = _bands(row_coverage > ROW_COVERAGE)
+    gaps = np.diff(centres) if centres.size > 1 else np.array([])
+    med_thick = float(np.median(thicknesses)) if thicknesses.size else None
+    med_gap = float(np.median(gaps)) if gaps.size else None
 
     return {
         "size": f"{w}x{h}",
         "colorfulness": round(colorfulness, 1),
         "ink%": round(ink * 100, 2),
         "h_line%": round(line_density * 100, 2),
-        "staff-like rows": len(line_thicknesses),
-        "interline_est_px": (round(interline_est, 1) if interline_est else None),
-        # Share of the page's centre that is a smooth mid-tone: the signature
-        # of a pictured graphic, measured in `graphics.py`.
+        # honest names
+        "horizontal_bands": int(starts.size),
+        "median_band_thickness_px": (round(med_thick, 1) if med_thick is not None else None),
+        "median_band_gap_px": (round(med_gap, 1) if med_gap is not None else None),
         "photo%": round(photo_fraction(gray), 2),
+        # legacy keys, now carrying the corrected quantities
+        "staff-like rows": int(starts.size),
+        "interline_est_px": (round(med_gap, 1) if med_gap is not None else None),
     }
 
 

@@ -30,15 +30,45 @@ def tally(label="x", notes=10, rests=2, pitched=8, pitches=None,
 
 
 class TestTallyMusicxml(unittest.TestCase):
-    def test_counts_notes_rests_and_pitches(self):
-        path = os.path.join(PER_STAFF, "p0020.s1_in.musicxml")
-        if not os.path.exists(path):
+    """Counting a real fragment, checked against an independent reader.
+
+    These used to pin 18 notes / 4 rests / 14 pitched for ``p0020.s1``. That
+    fragment was re-recognised on 2026-10-28 (the page went from 8 detected
+    staves to 9, and homr's reading of each staff changed with it), so the
+    magic numbers described a file that no longer exists. Pinning numbers is
+    the wrong shape for this test anyway: what matters is that
+    :func:`scorehalo.reconcile.tally_musicxml` agrees with a plain XML read of
+    the same file. ElementTree is the independent reader -- if the tally ever
+    starts counting something else (a chord's second note twice, a grace note
+    as a rest), the two disagree.
+    """
+
+    PATH = os.path.join(PER_STAFF, "p0020.s1_in.musicxml")
+
+    def setUp(self):
+        if not os.path.exists(self.PATH):
             self.skipTest("p0020 fragments not present")
-        counted = reconcile.tally_musicxml(path)
-        self.assertEqual(counted.notes, 18)
-        self.assertEqual(counted.rests, 4)
-        self.assertEqual(counted.pitched, 14)
-        self.assertEqual(counted.measures, 4)
+        self.counted = reconcile.tally_musicxml(self.PATH)
+
+    def _raw(self):
+        import xml.etree.ElementTree as ET
+        root = ET.parse(self.PATH).getroot()
+        notes = [n for part in root.findall("part")
+                 for measure in part.findall("measure")
+                 for n in measure.findall("note")]
+        rests = [n for n in notes if n.find("rest") is not None]
+        return root, notes, rests
+
+    def test_counts_notes_rests_and_pitches(self):
+        _root, notes, rests = self._raw()
+        self.assertEqual(self.counted.notes, len(notes))
+        self.assertEqual(self.counted.rests, len(rests))
+        self.assertEqual(self.counted.pitched, len(notes) - len(rests))
+
+    def test_counts_the_measures_the_file_has(self):
+        root, _notes, _rests = self._raw()
+        measures = sum(len(part.findall("measure")) for part in root.findall("part"))
+        self.assertEqual(self.counted.measures, measures)
 
     def test_rests_and_pitches_partition_the_notes(self):
         path = os.path.join(PER_STAFF, "p0020.s1_in.musicxml")

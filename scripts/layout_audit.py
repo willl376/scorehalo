@@ -1,52 +1,61 @@
-"""Cross-check the layout detector against homr across a converted run.
+"""Report detected page geometry and independent MusicXML structural counts.
 
-Why: the detector's parameters were tuned on ONE labeled page (p0020, which
-Wilbur labeled 2+3+3 = 8 staves). A single page is an anecdote. This script
-runs the detector over every converted page and reports, per page:
+No staff-loss, staff-recovery, or transcription-accuracy claims are made.
+Exit codes: 0 = selected pages processed without geometry/XML errors;
+1 = page errors, unusable XML, or no selected pages;
+2 = input, argument, or report-writing errors.
 
-  * detected staff count and system grouping
-  * homr's staff count (from the generated MusicXML)
-  * how many staves homr LOST
-
-Two things make the result trustworthy rather than merely flattering:
-  1. If the grouping is identical on every page, that is a BUG SIGNAL, not a
-     finding -- a detector that always says 2+3+3 has learned nothing.
-  2. Every page must actually be measured; verify the counts vary.
-
-Usage: python scripts/layout_audit.py [out_dir] [--dpi 300] [--json out.json]
+XML status 'ok' means supported XML containing parts and measures, not
+schema validity or accurate transcription. Zero-note output is reported.
 """
 
 import argparse
+from collections import Counter
 import json
+import math
 import os
+from pathlib import Path
 import sys
-import xml.etree.ElementTree as ET
+import tempfile
 
-import numpy as np
-import pypdfium2 as pdfium
+ROOT = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "pysrc/scorehalo").is_dir()
+    and (p / "scripts/make_fixture.py").is_file()
+)
+sys.path.insert(0, str(ROOT / "pysrc"))
+from reporting_stats import xml_stats
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pysrc"))
-from scorehalo.layout import analyze_page  # noqa: E402
+
+def clean_json(value):
+    if isinstance(value, dict):
+        return {str(k): clean_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean_json(v) for v in value]
+    if hasattr(value, "item"):
+        return clean_json(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
-def homr_max_staves(musicxml_path):
-    """Largest <staves> declared by homr in the file (1 if none)."""
-    if not os.path.exists(musicxml_path):
-        return -1
+def write_report(path, report):
+    path = Path(path)
+    payload = json.dumps(clean_json(report), indent=2, allow_nan=False) + "\n"
+    temporary = None
     try:
-        root = ET.parse(musicxml_path).getroot()
-    except ET.ParseError:
-        return -1
-    best = 0
-    for part in root.findall("part"):
-        for m in part.findall("measure"):
-            a = m.find("attributes/staves")
-            if a is not None and a.text:
-                try:
-                    best = max(best, int(a.text))
-                except ValueError:
-                    pass
-    return best or 1
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=path.name + ".", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def main(argv=None):
@@ -54,84 +63,198 @@ def main(argv=None):
     ap.add_argument("out_dir", nargs="?", default="data/out-band")
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--json", default="")
-    ap.add_argument("--cache", default="", help="dir for rendered page images")
+    ap.add_argument(
+        "--cache", default="",
+        help="compatibility option; this audit always renders fresh pages"
+    )
     args = ap.parse_args(argv)
+    if args.dpi <= 0:
+        ap.error("--dpi must be positive")
 
-    man_path = os.path.join(args.out_dir, "manifest.json")
-    with open(man_path) as fh:
-        man = json.load(fh)
-    recs = [p for p in man["pages"] if p.get("status") == "ok"]
-    if not recs:
-        raise SystemExit(f"no pages with status 'ok' in {man_path}")
-    src_pdf = man.get("source")
-    if not src_pdf or not os.path.exists(src_pdf):
-        raise SystemExit(f"source PDF missing: {src_pdf}")
-    pdf = pdfium.PdfDocument(src_pdf)
-    scale = args.dpi / 72.0
-    # manifest "page" is 1-BASED (p0020 -> page 20); pypdfium2 is 0-based.
-    # Getting this wrong silently analyzes the neighbouring page, so do it once
-    # here and loudly rather than at every use site.
-    def page_image(one_based_page):
-        idx = one_based_page - 1
-        if not 0 <= idx < len(pdf):
-            raise SystemExit(f"page {one_based_page} out of range (len={len(pdf)})")
-        return pdf[idx].render(scale=scale).to_pil()
-
-    if args.cache:
-        os.makedirs(args.cache, exist_ok=True)
+    out = Path(args.out_dir).resolve()
+    manifest_path = out / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+        pages = manifest.get("pages")
+        if not isinstance(pages, list):
+            raise ValueError("manifest pages must be a list")
+        if any(not isinstance(p, dict) for p in pages):
+            raise ValueError("every manifest page must be an object")
+        selected = [p for p in pages if p.get("status") == "ok"]
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     rows = []
-    print(f"  {'page':>6} {'detected':>9} {'grouping':>18} {'homr':>5}  verdict")
-    for p in recs:
-        name = os.path.splitext(os.path.basename(p["image"]))[0]
-        cache = os.path.join(args.cache, f"{name}.png") if args.cache else ""
-        gray = None
-        if cache and os.path.exists(cache):
-            from PIL import Image
-            gray = np.array(Image.open(cache).convert("L"))
-        else:
-            gray = np.array(page_image(p["page"]).convert("L"))
-            if cache:
-                from PIL import Image
-                Image.fromarray(gray).save(cache)
-        r = analyze_page(gray)
-        grp = "+".join(str(s["n_staves"]) for s in r["systems"])
-        h = homr_max_staves(os.path.join(args.out_dir, f"{name}.musicxml"))
-        lost = r["n_staves"] - h if h > 0 else 0
-        rows.append({
-            "page": name, "src": p["page"], "detected": r["n_staves"],
-            "grouping": grp, "n_systems": r["n_systems"],
-            "staff_space": r["staff_space"], "skew": r["skew_deg"],
-            "homr": h, "lost": lost,
-        })
-        print(f"  {name:>6} {r['n_staves']:>9} {grp:>18} {h:>5}  "
-              f"{'ok' if lost <= 0 else f'LOST {lost}'}")
+    pdf = None
+    exit_code = 0
+    try:
+        if selected:
+            import numpy as np
+            import pypdfium2 as pdfium
+            from scorehalo.layout import analyze_page
 
-    counts = [r["detected"] for r in rows]
-    grps = [r["grouping"] for r in rows]
-    tot_d = sum(counts)
-    tot_h = sum(r["homr"] for r in rows if r["homr"] > 0)
-    lost_pages = [r for r in rows if r["lost"] > 0]
-    print()
-    print(f"  pages measured      : {len(rows)}")
-    print(f"  staves detected     : {tot_d}   (homr declared {tot_h})")
-    if tot_d:
-        print(f"  homr recovery       : {100.0 * tot_h / tot_d:.1f}% of detected staves")
-    print(f"  pages with loss     : {len(lost_pages)} of {len(rows)}")
-    print(f"  distinct counts     : {sorted(set(counts))}")
-    print(f"  distinct groupings  : {len(set(grps))} of {len(rows)}")
-    if len(set(grps)) <= 1:
-        print("  VERDICT: identical grouping on every page -> BUG SIGNAL, "
-              "the detector is not actually discriminating")
-    else:
-        print("  VERDICT: groupings vary across pages -> not trivially overfit")
-    if args.json:
-        with open(args.json, "w") as fh:
-            json.dump({"rows": rows, "total_detected": tot_d,
-                       "total_homr": tot_h}, fh, indent=2)
-        print(f"  wrote {args.json}")
-    return 0
+            source = manifest.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("manifest source must be a nonempty PDF path")
+            # Preserve the old audit's cwd-relative source-path convention.
+            source_path = Path(source).resolve()
+            if not source_path.is_file():
+                raise ValueError(f"source PDF missing: {source_path}")
+            pdf = pdfium.PdfDocument(str(source_path))
+        else:
+            source_path = None
+            exit_code = 1
+
+        if args.cache:
+            print("NOTE: --cache accepted; cached images are not read or written.")
+
+        print("page       detected  grouping       xml-status   pitched  rests")
+        for number, record in enumerate(selected, 1):
+            row = {
+                "selected_index": number,
+                "source_page": record.get("page"),
+                "image": record.get("image"),
+                "geometry_status": "error",
+                "geometry": None,
+                "xml": {"status": "unresolved"},
+                "errors": [],
+            }
+
+            try:
+                image = record.get("image")
+                if not isinstance(image, str) or not image.strip():
+                    raise ValueError("page image must be a nonempty string")
+                name = Path(image).stem
+                xml_path = out / (name + ".musicxml")
+                row["page"] = name
+                row["xml_path"] = str(xml_path)
+                row["xml"] = xml_stats(xml_path)
+            except Exception as exc:
+                row["errors"].append(f"XML lookup: {type(exc).__name__}: {exc}")
+
+            page = bitmap = None
+            try:
+                one_based = record.get("page")
+                if (
+                    isinstance(one_based, bool)
+                    or not isinstance(one_based, int)
+                    or not 1 <= one_based <= len(pdf)
+                ):
+                    raise ValueError(f"invalid 1-based PDF page: {one_based!r}")
+                page = pdf[one_based - 1]
+                bitmap = page.render(scale=args.dpi / 72.0)
+                image = bitmap.to_pil()
+                try:
+                    gray = np.array(image.convert("L"))
+                finally:
+                    image.close()
+                result = analyze_page(gray)
+                row["geometry"] = clean_json({
+                    "detected_staves": int(result["n_staves"]),
+                    "detected_systems": int(result["n_systems"]),
+                    "grouping": [
+                        int(s["n_staves"]) for s in result["systems"]
+                    ],
+                    "staff_space_px": result["staff_space"],
+                    "skew_deg": result["skew_deg"],
+                })
+                row["geometry_status"] = "ok"
+            except Exception as exc:
+                row["errors"].append(
+                    f"geometry: {type(exc).__name__}: {exc}"
+                )
+            finally:
+                for resource in (bitmap, page):
+                    if resource is not None:
+                        try:
+                            resource.close()
+                        except Exception as exc:
+                            row["errors"].append(
+                                f"resource close: {type(exc).__name__}: {exc}"
+                            )
+
+            if row["errors"] or row["xml"]["status"] != "ok":
+                exit_code = 1
+            rows.append(row)
+
+            geometry = row["geometry"] or {}
+            grouping = "+".join(
+                str(n) for n in geometry.get("grouping", [])
+            ) or "-"
+            stats = row["xml"]
+            label = row.get("page", f"record-{number}")
+            print(
+                f"{label:<10} "
+                f"{str(geometry.get('detected_staves', '-')):>8}  "
+                f"{grouping:<13} "
+                f"{stats['status']:<12} "
+                f"{str(stats.get('pitched_notes', '-')):>7}  "
+                f"{str(stats.get('rests', '-')):>5}"
+            )
+            for error in row["errors"]:
+                print(f"  ERROR: {error}")
+            if stats.get("why"):
+                print(f"  XML: {stats['why']}")
+
+        measured = [
+            r for r in rows if r["geometry_status"] == "ok"
+        ]
+        summary = {
+            "manifest_pages": len(pages),
+            "selected_pages": len(selected),
+            "geometry_pages_processed": len(measured),
+            "zero_detected_staff_pages": sum(
+                r["geometry"]["detected_staves"] == 0 for r in measured
+            ),
+            "geometry_error_pages": len(rows) - len(measured),
+            "pages_with_processing_errors": sum(
+                bool(r["errors"]) for r in rows
+            ),
+            "xml_status_counts": dict(Counter(
+                r["xml"]["status"] for r in rows
+            )),
+            "xml_ok_zero_note_pages": sum(
+                r["xml"]["status"] == "ok"
+                and r["xml"]["note_elements"] == 0 for r in rows
+            ),
+        }
+        report = {
+            "metadata": {
+                "report_format_version": 1,
+                "manifest": str(manifest_path),
+                "source": str(source_path) if source_path else None,
+                "dpi": args.dpi,
+                "cache_policy": "disabled; fresh rendering",
+                "limitations": [
+                    "Geometry is detector output, not ground truth.",
+                    "XML counts do not establish transcription accuracy.",
+                    "XML status ok is not full MusicXML validation.",
+                    "part_measures sums measures across musical parts.",
+                ],
+            },
+            "summary": summary,
+            "rows": rows,
+        }
+        print("\nSummary:")
+        print(json.dumps(summary, indent=2))
+        print(
+            "No staff-loss or recovery percentage is calculated. "
+            "Grouping variation is not a detector-validation test."
+        )
+        if args.json:
+            write_report(args.json, report)
+            print(f"Wrote {args.json}")
+        return exit_code
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if pdf is not None:
+            pdf.close()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
