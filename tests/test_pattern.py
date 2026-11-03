@@ -18,9 +18,11 @@ from scorehalo.graph import Measure, Note, Page, Part, Pitch
 
 DATA = os.path.join("data", "out-perstaff", "homr", "p0020")
 
-#: s1+s2 = system 1, s3+s4+s5 = system 2, s6+s7+s8 = system 3, per the brace
-#: measurements in scorehalo.brace and Wilbur's reading of the page.
-P0020_LAYOUT = {1: (1, 2), 2: (3, 4, 5), 3: (6, 7, 8)}
+#: s1+s2+s3 = system 1, s4+s5+s6 = system 2, s7+s8+s9 = system 3. Nine staves
+#: in three systems of three, per the deskewed brace measurements in
+#: scorehalo.brace and the lyrics tesseract reads under staffs 1, 4 and 7.
+#: Re-measured 2026-11-02; the earlier map assumed eight staves (2+3+3).
+P0020_LAYOUT = {1: (1, 2, 3), 2: (4, 5, 6), 3: (7, 8, 9)}
 
 
 def notes(measure_number, staff, octave, count, step="C"):
@@ -366,9 +368,11 @@ class TestBuiltInExample(unittest.TestCase):
 class TestP0020RealFragments(unittest.TestCase):
     """The real corpus. This is where the module earns its place.
 
-    Expected findings, from the measurements recorded in scorehalo.brace:
-    systems 2 and 3 share a pattern (3 staves, G2 G2 F4); system 1 has two
-    staves and homr gave it G2 G2, which is the ``i < 5`` clef rewrite.
+    Expected findings, measured 2026-11-02 on the nine-staff per-staff fixture:
+    systems 2 and 3 share a pattern (3 staves, 4/4, clefs G2 G2 F4); system 1
+    deviates because its bass staff comes back from homr as a *two-staff* part
+    -- so the signature sees four staves (G2 G2 G2 F4) and pitch counts split
+    across them. The deviation is a part/clef shape, not a dropped staff.
     """
 
     def _page(self):
@@ -391,17 +395,38 @@ class TestP0020RealFragments(unittest.TestCase):
         report = pattern.find_deviations(self._page())
         self.assertEqual([d.system for d in report.deviations], [1])
 
-    def test_system_one_deviation_names_the_missing_bass_clef(self):
+    def test_system_one_deviation_names_the_extra_staff(self):
+        """The deviation is named for what actually differs: staff count.
+
+        homr returned system 1's bass staff as a two-staff part, so the
+        signature sees four staves where the other systems have three. Naming
+        the wrong cause (a "missing bass clef") would send a reader hunting for
+        a clef that is present.
+        """
         report = pattern.find_deviations(self._page())
         broke = report.deviations[0].broke
-        self.assertTrue(any("F4" in phrase for phrase in broke), broke)
+        self.assertTrue(any("staff count 4" in phrase for phrase in broke), broke)
 
-    def test_bar_length_column_catches_the_three_four_bar(self):
-        """System 2's piano staves hold 36-tick bars where every other system
-        holds 48 -- homr's declared 3/4, which the pattern contradicts."""
+    def test_bar_length_column_is_quiet_because_this_fixture_has_one_meter(self):
+        """Measured 2026-11-02: no bar-length outlier on p0020 -- honestly.
+
+        The historical claim here was a 3/4 bar (36 ticks) in system 2 against
+        everyone's 48, which the pattern module contradicted. That reading came
+        from the retired per-system recognition path. The per-staff fragments
+        that replaced it each declare 4/4, so there is nothing to contradict,
+        and asserting an outlier would be asserting a fixture that no longer
+        exists.
+
+        What this page does show is *overfull* bars -- content overrunning the
+        declared 4/4 without contradicting any declaration. That is
+        scorehalo.meter's job, and it is proven on this same fixture in
+        tests/test_meter.py (19 notes would be dropped; extending the barlines
+        recovers all 183). The column's ability to catch a genuine 3/4 bar is
+        covered synthetically by the `bar_outliers == [2]` test above.
+        """
         report = pattern.find_deviations(self._page())
         bar_outliers = [s for column in report.columns for s in column.bar_outliers]
-        self.assertIn(2, bar_outliers)
+        self.assertEqual(bar_outliers, [])
 
     def test_the_real_page_is_not_weak(self):
         self.assertFalse(pattern.find_deviations(self._page()).weak)

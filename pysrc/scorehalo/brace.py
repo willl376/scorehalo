@@ -11,15 +11,23 @@ is a guess that breaks the moment the layout is not the common one:
   wrong -- the clef-based rule sees ``(G, G, F)`` and pairs staves 1 and 2,
   silently folding the vocal line into the piano.
 
-Measured on p0020 (300dpi, ``data/out-band/render/p0020.png``):
+Measured on p0020 (300dpi). Use the DESKEWED render
+(``data/out-perstaff/p0020.deskew.png``) -- that is the pipeline's input:
 
-===========  ==========================  ==========  ==========================
-system       brace ink                  brace width  staves covered
-===========  ==========================  ==========  ==========================
-sys1         y=650..988                 27px         1, 2   (piano alone)
-sys2         y=1635..1949               22px         4, 5   (s3 = the voice)
-sys3         y=2600..2913               25px         7, 8   (s6 = the voice)
-===========  ==========================  ==========  ==========================
+===========  =========================  ===========  =========================
+system       brace ink (y, deskewed)   brace width  staves covered
+===========  =========================  ===========  =========================
+sys1         y=670..968                 ~15px        2, 3   (staff 1 = voice)
+sys2         y=1793..2091               ~15px        5, 6   (staff 4 = voice)
+sys3         y=2917..3215               ~15px        8, 9   (staff 7 = voice)
+===========  =========================  ===========  =========================
+
+The page holds nine staves in three systems of three; the voice is the top staff
+of every system (tesseract reads lyrics under staff 1, 4 and 7). An earlier
+reading of this table recorded eight staves with "sys1 = piano alone": that read
+the raw, skewed render, where the left system bracket tilts into this margin
+window and is measured as a brace spanning all three staves -- so the singer
+silently became piano. Deskew first; the bracket then stays out of the window.
 
 Two facts fell out of that measurement, and both are load-bearing:
 

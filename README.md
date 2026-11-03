@@ -48,8 +48,13 @@ at a time** (`layout.py`):
    span them — gaps between staves are *not* a reliable signal, brackets are
 6. crop each staff and run homr on the crop, then merge the results
 
-Per-staff cropping on p0020 recovers **8 of 8 staves** where the whole page
-yielded 2, every run `rc=0`.
+Per-staff cropping on p0020 finds **9 staves** (three systems of three) and every
+crop recognizes at `rc=0`, where one whole-page recognition pass returns 2 parts.
+Measured 2026-11-02; the earlier "8 of 8 staves" here was wrong twice over — the
+page has nine, and the number it counted was the `<staves>` declaration inside
+each emitted part, not a count of staff regions. Do not read `<staves>` as a
+recovery score: it is a per-part declaration defaulting to 1, so a crop with one
+declared staff satisfies it by construction.
 
 ### Two bugs the measurement caught
 
@@ -85,8 +90,14 @@ Recognition of every detected staff is driven by `scripts/per_staff_all.py`; it
 appends to `per_staff.jsonl` as it goes and resumes where it left off. Current
 result over the 16 converted pages: **186 of 187 staves recognised, 3,937
 notes** — the detected count rose from 167 staves when the layout-healing fix
-landed. p0020 contributes 118 notes across its 8 staves, against 120 from the
-whole page.
+landed. p0020 contributes 183 notes across its **9** staves (re-measured
+2026-11-02; the earlier "118 notes across its 8 staves" came from the first
+detector pass, which missed the page's voice staff), against 194 from a
+whole-page pass.
+
+Note counts alone do not rank the two passes: the whole-page result is 2 parts
+with the singer folded into the piano, while the per-staff result keeps the voice
+as its own line. Compare *structure*, not totals.
 
 ### homr needs a patch before this works at scale
 
@@ -223,11 +234,26 @@ artifacts, skew, speckle) to imitate the 1972 photocopy scans.
 reports the substitution classes: exact, right-pitch-wrong-duration,
 wrong-pitch, missed, spurious.
 
-Current result (6- and 8-measure fixtures, several skew seeds): pitch 100%,
-duration ~89-90%, no notes invented or dropped, and unchanged when the image
-loses 35% of its edge energy. The one error class is beamed eighth-note pairs
-read as dotted eighths. Caveat: fixtures are clean engravings at moderate
-degradation, so this is the easy end of the range, not real-book accuracy.
+Current result (6-measure fixture, skew seed 7, `none`/`light`/`scan`, MuseScore
+3.6.2 engraving → image): **37 of 37 notes exact in every degradation case —
+100% precision, 100% recall, zero pitch errors, zero duration errors, no notes
+invented or dropped.** Re-measured 2026-11-02 (run `20261101-040432-yeq95h0d`,
+`data/bench/runs/`).
+
+Superseded claim, kept so it is not rediscovered: this section used to report
+"pitch 100%, duration ~89-90%, the one error class beamed eighth-note pairs read
+as dotted eighths." That was **the benchmark measuring its own fixture bug**.
+`make_fixture.py` decided dotting with `dotted = (beats * 2) % 2 == 1`, which
+marked a half-beat eighth as dotted (notation 3/8, three ticks) while writing
+`<duration>2</duration>`, and never marked a real dotted eighth. 4 of 27 fixture
+notes were self-contradictory, so MuseScore engraved bars of 4.25 beats in 4/4
+and the "truth" XML stopped describing the picture. Repairing the fixture took
+the same recognizer from 33/38 exact (86.8% / 89.2%) to 37/37 (100% / 100%) with
+the degradation untouched. Every duration figure recorded before that repair is
+void; the recognizer never had that error class.
+
+Caveat that survives: fixtures are clean engravings at moderate degradation, so
+this is the easy end of the range, not real-book accuracy.
 
 ## Layout
 
@@ -250,7 +276,7 @@ degradation, so this is the easy end of the range, not real-book accuracy.
 - `scripts/bench_fixtures.py` run fixtures through convert and score them
 - `scripts/validate_layout.py`  arithmetic audit of detected staves (5 lines, even spacing)
 - `scripts/layout_audit.py`   detector vs homr staff counts across a run
-- `scripts/crop_probe.py`     system vs per-staff crop experiment (the 8-of-8 proof)
+- `scripts/crop_probe.py`     system vs per-staff crop experiment (measures note yield; its old "recovered N of N staves" verdict was withdrawn — see above)
 - `scripts/per_staff_all.py`  parallel per-staff recognition over a whole run
 - `scripts/annotate_layout.py` overlay staves/systems on a page for eyeballing
 - `scripts/per_staff_assemble.py` + `scripts/build_page_graph.py`  fragments -> one assembled two-part PAGE

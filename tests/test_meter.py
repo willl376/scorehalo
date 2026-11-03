@@ -5,6 +5,7 @@ Run from the scorehalo repo root::
     .venv/bin/python -m unittest tests.test_meter
 """
 
+import os
 import unittest
 
 from scorehalo.graph import Measure, Note, Page, Part, Pitch
@@ -198,75 +199,124 @@ class TestFormatOverrides(unittest.TestCase):
 
 
 class TestRealPageP0020(unittest.TestCase):
-    """The failure this module was written for, on the real page.
+    """What this module has to do on the real page -- re-measured 2026-11-02.
 
-    Skipped unless the assembled page and its fragments are on disk, so this
-    file stays green in a checkout with no data.
+    History, so the change is not mistaken for a weakening. These tests used to
+    read ``data/out-system`` (per-system recognition). There homr declared 3/4
+    for system 2's piano staves, the emitter dropped the four notes lying at or
+    past that barline (128 -> 124), and reconciling the page meter got them
+    back. That path is retired and its fixture directory is gone, so the old
+    assertions measured a page that no longer exists -- and worse, they were
+    "passing" through ``_assemble_real_page`` returning an EMPTY page, whose
+    0 == 0 proves nothing.
+
+    The per-staff fixture that ships tells a related but different story, and
+    these tests now measure it: one declared meter (4/4, nothing to reconcile),
+    but four bars whose content overruns it. Emitting them loses 19 of 183
+    notes; ``extend_overfull_bars`` lengthens those four barlines page-wide and
+    recovers every one. Same defect family, same guarantee -- on data that is
+    on disk.
     """
 
+    DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "out-perstaff")
+    FRAGMENTS = os.path.join(DATA, "homr", "p0020")
+    #: Nine staves, three systems of three (see tests/test_brace.py).
+    LAYOUT = {1: (1, 2, 3), 2: (4, 5, 6), 3: (7, 8, 9)}
+
     def setUp(self):
-        import os
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from tests.test_emit_invariants import _assemble_real_page
-        # reconcile=False on purpose: these tests need the UNFIXED page so they
-        # can show the loss and then show it gone. The shipping path reconciles.
-        self.page, self.order, self.nsystems = _assemble_real_page(
-            reconcile=False)
+        if not os.path.isdir(self.FRAGMENTS):
+            self.skipTest("p0020 per-staff fragments not present")
+        self.page = self._page()
 
-    def test_p0020_has_a_meter_disagreement_to_reconcile(self):
-        """Guard: if homr ever stops disagreeing, this test must be revisited
-        rather than silently passing for the wrong reason."""
-        self.assertGreater(len(declared_meters(self.page)), 1)
+    def _page(self):
+        """Assemble the page from its staff fragments, exactly as production pads it."""
+        from scorehalo.emit import GLOBAL_DIVISIONS, parse_part
+        from scorehalo.graph import Measure, Page, Part
 
-    def test_p0020_recovers_the_four_dropped_notes(self):
-        """128 pitched notes in the graph; 124 reached the file.
+        parts = []
+        for system, staves in sorted(self.LAYOUT.items()):
+            for position, staff in enumerate(staves, start=1):
+                path = os.path.join(self.FRAGMENTS,
+                                    "p0020.s%d_in.musicxml" % staff)
+                for parsed in parse_part(path, staff_index=position,
+                                         system=system):
+                    parts.append(Part(id="P%d_s%d" % (system, staff),
+                                      name=parsed.name,
+                                      staff_index=parsed.staff_index,
+                                      measures=list(parsed.measures)))
+        page = Page(id="p0020", divisions=GLOBAL_DIVISIONS, parts=parts)
+        width = max(len(p.measures) for p in page.parts)
+        for part in page.parts:
+            for number, measure in enumerate(part.measures, start=1):
+                measure.number = number
+            while len(part.measures) < width:
+                part.measures.append(Measure(number=len(part.measures) + 1,
+                                             divisions=GLOBAL_DIVISIONS,
+                                             is_empty=True))
+        return page
 
-        The four are the notes at or past the 3/4 barline in system 1. Fixing
-        the misread meter must get all four back.
-        """
+    @staticmethod
+    def _emitted(page):
         import xml.etree.ElementTree as ET
         from scorehalo.emit import emit_page
 
+        root = ET.fromstring(emit_page(page))
+        return sum(1 for p in root.findall("part")
+                   for m in p.findall("measure")
+                   for n in m.findall("note") if n.find("rest") is None)
+
+    def test_p0020_declares_one_meter(self):
+        """Honest statement of the fixture: the old three-four read is gone.
+
+        The guard this replaces demanded a disagreement (`> 1` declared meter)
+        and so could only ever pass in a checkout that still had the retired
+        per-system data. The per-staff fragments each declare 4/4.
+        """
+        self.assertEqual(sorted(declared_meters(self.page)), [(4, 4)])
+
+    def test_p0020_needs_no_meter_override(self):
+        """Nothing contradicts a declaration here, so reconcile_meter is a no-op.
+
+        Overfull bars are a different defect -- content that fits NO declared
+        bar -- and they are the two tests below.
+        """
+        self.assertEqual(reconcile_meter(self.page), [])
+
+    def test_p0020_loses_nineteen_notes_without_barline_extension(self):
+        """183 pitched notes in the graph; 164 reach the file.
+
+        The 19 are the notes lying at or past the barlines of the four overfull
+        bars (measures 1-4), which homr read longer than 4/4 holds.
+        """
         graph = sum(1 for n in self.page.notes if not n.is_rest)
-        before = ET.fromstring(emit_page(self.page))
-        before_count = sum(1 for p in before.findall("part")
-                           for m in p.findall("measure")
-                           for n in m.findall("note") if n.find("rest") is None)
+        self.assertEqual(graph, 183)
+        self.assertEqual(self._emitted(self.page), 164)
 
-        overrides = reconcile_meter(self.page)
-        after = ET.fromstring(emit_page(self.page))
-        after_count = sum(1 for p in after.findall("part")
-                          for m in p.findall("measure")
-                          for n in m.findall("note") if n.find("rest") is None)
-
-        self.assertEqual(graph, 128)
-        self.assertEqual(before_count, 124)          # the loss, reproduced
-        self.assertTrue(overrides, "expected at least one meter override")
-        self.assertEqual(after_count, graph)         # nothing lost now
+    def test_extending_the_barlines_recovers_all_of_them(self):
+        """The barline gives, so nothing dies: 164 -> 183, four bars widened."""
+        graph = sum(1 for n in self.page.notes if not n.is_rest)
+        extended, unrepairable = extend_overfull_bars(self.page)
+        self.assertEqual([e.measure for e in extended], [1, 2, 3, 4])
+        self.assertEqual(unrepairable, [])
+        self.assertEqual(self._emitted(self.page), graph)
 
     def test_the_shipped_page_already_loses_nothing(self):
-        """The production path reconciles, so it must never show the loss.
+        """The production artifact itself, not a rebuild of it.
 
-        The test above proves the fix works. This one proves it is actually
-        wired up: _assemble_real_page grew its own copy of the assembly logic
-        instead of calling the production path, so for a while the production
-        bug was fixed while these tests still measured the broken behaviour --
-        and both were green.
+        ``data/out-perstaff/PAGE-p0020.musicxml`` is what per_staff_assemble.py
+        wrote (it calls extend_overfull_bars). Comparing it against the
+        fragments' own count is a real end-to-end check -- unlike the previous
+        version of this test, which compared an empty page to itself.
         """
-        import os
-        import sys
         import xml.etree.ElementTree as ET
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from scorehalo.emit import emit_page
-        from tests.test_emit_invariants import _assemble_real_page
 
-        page, _order, _n = _assemble_real_page()      # the shipping default
-        graph = sum(1 for n in page.notes if not n.is_rest)
-        shipped = sum(1 for p in ET.fromstring(emit_page(page)).findall("part")
+        fragments = sum(1 for n in self.page.notes if not n.is_rest)
+        root = ET.parse(os.path.join(self.DATA, "PAGE-p0020.musicxml")).getroot()
+        shipped = sum(1 for p in root.findall("part")
                       for m in p.findall("measure")
                       for n in m.findall("note") if n.find("rest") is None)
-        self.assertEqual(shipped, graph)
+        self.assertEqual(shipped, fragments)
 
 
 class TestExtendOverfullBars(unittest.TestCase):

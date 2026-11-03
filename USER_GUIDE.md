@@ -248,9 +248,16 @@ On **clean, digitally engraved** input, measured note-by-note against known
 ground truth:
 
 - **Pitch: 100% correct**
-- **Duration: ~89–90% correct** — the errors are beamed eighth pairs read as
-  dotted eighths
+- **Duration: 100% correct** — 37 of 37 notes exact, re-measured 2026-11-02
 - No notes invented or dropped
+
+An earlier edition of this guide reported *duration ~89–90%, errors being beamed
+eighth pairs read as dotted eighths*. That figure was wrong, and not because the
+recognizer improved: the fixture generator wrote a contradiction (a half-beat
+eighth marked as dotted while its `<duration>` said otherwise), so the engraved
+test image did not match its own truth file. Repairing the fixture took the same
+recognizer from 33/38 to 37/37 with the degradation untouched. See
+"Measuring accuracy" in `README.md`.
 
 **That is the easy end of the range.** Those pages were engraved cleanly and
 then deliberately degraded. A real 200-pii photocopy with bleed-through,

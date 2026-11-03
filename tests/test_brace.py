@@ -5,16 +5,29 @@ is on top. It is wrong whenever the singer sits between or below the
 accompaniment, and it fails *silently* -- the score still engraves, just with
 the vocal line folded into the piano.
 
-All the geometry here is measured from p0020 at 300dpi
-(``data/out-band/render/p0020.png``) and confirmed by Wilbur reading the page:
+All the geometry here is measured from p0020 at 300dpi, on the DESKEWED render
+the per-staff pipeline actually reads (``data/out-perstaff/p0020.deskew.png``):
 
-* sys1 is a piano introduction -- brace over both staves, no singer;
-* sys2 has "Slowly" above staff 3, the voice, with the piano braced below;
-* sys3 repeats that shape -- voice on staff 6, piano braced on staves 7 and 8;
-* one singer throughout; the piano plays under her in every system.
+* every system is three staves -- voice on top, piano braced under it;
+* the voice is the staff the brace does NOT cover, in all three systems;
+* so the brace covers global staves 1-2, 4-5 and 7-8 (0-based).
 
-Tests needing a real image read ``data/out-band/render/p0020.png`` and are
-skipped when it is absent, so the synthetic ones below still run anywhere.
+Re-measured 2026-11-02. This corrects an earlier reading that called sys1 a
+piano-only introduction with no singer: the per-staff detector finds NINE staves
+on this page (3+3+3), and tesseract reads lyrics directly under the top staff of
+every system -- "gers. in man-y" (sys1), "Let's take a life-time to say 'I knew
+you'" (sys2), "for on-ly time will tell us so" (sys3). A system with lyrics has
+a singer, so the old two-staff sys1 was a miss, not a piano solo.
+
+The lesson the constants below encode: **read the deskewed image.** On the raw
+render the page's skew tilts the left system bracket across the margin window,
+and ``brace_strokes`` then reports one stroke spanning the whole system
+(y=325..980) -- a bracket read as a brace, which silently turns the singer into
+piano. ``test_the_raw_render_misleads_which_is_why_the_fixture_is_deskewed``
+pins that trap so nobody "simplifies" this fixture back to the raw render.
+
+Tests needing a real image read those files and are skipped when absent, so the
+synthetic ones below still run anywhere.
 
 Run: .venv/bin/python -m unittest discover -s tests -v
 """
@@ -33,9 +46,11 @@ from scorehalo.brace import (BRACE_MIN_WIDTH, brace_groups, brace_strokes)
 
 # The measured truth for p0020, as GLOBAL staff indices (0-based, reading
 # order over the whole page): which staves a brace covers, per system.
-P0020_BRACED = {"sys1": [0, 1], "sys2": [3, 4], "sys3": [6, 7]}
+P0020_BRACED = {"sys1": [1, 2], "sys2": [4, 5], "sys3": [7, 8]}
 # Which staff within its system carries the singer (local indices), or None.
-P0020_SINGER = {"sys1": None, "sys2": 0, "sys3": 0}
+P0020_SINGER = {"sys1": 0, "sys2": 0, "sys3": 0}
+# The three staves of each system, as global indices.
+P0020_SYSTEMS = {"sys1": [0, 1, 2], "sys2": [3, 4, 5], "sys3": [6, 7, 8]}
 
 
 def synth_system(n_staves, brace=None, stem=False):
@@ -183,24 +198,38 @@ class BraceGroupTests(unittest.TestCase):
 class P0020RealImageTests(unittest.TestCase):
     """The measured page, if it is on disk."""
 
-    IMAGE = os.path.join(ROOT, "data", "out-band", "render", "p0020.png")
+    # The deskewed render is the pipeline's input; see the module docstring for
+    # why the raw render is the wrong fixture.
+    IMAGE = os.path.join(ROOT, "data", "out-perstaff", "p0020.deskew.png")
+    RAW = os.path.join(ROOT, "data", "out-band", "render", "p0020.png")
     BOXES = os.path.join(ROOT, "data", "out-perstaff", "p0020.boxes.json")
 
     def setUp(self):
         if not (os.path.exists(self.IMAGE) and os.path.exists(self.BOXES)):
-            self.skipTest("p0020 render or boxes not present")
+            self.skipTest("p0020 deskewed render or boxes not present")
 
-    def _load(self):
+    def _load(self, path=None):
         from PIL import Image
         with open(self.BOXES) as fh:
             boxes = json.load(fh)
-        ink = np.asarray(Image.open(self.IMAGE).convert("L")) < 128
+        ink = np.asarray(Image.open(path or self.IMAGE).convert("L")) < 128
         return ink, boxes["staves"]
+
+    def test_the_page_has_nine_staves_in_three_systems(self):
+        """The premise every constant below rests on.
+
+        The earlier reading of this page saw eight staves because it missed the
+        voice staff of system 1.
+        """
+        with open(self.BOXES) as fh:
+            boxes = json.load(fh)
+        self.assertEqual(boxes["n_staves"], 9)
+        self.assertEqual(boxes["n_systems"], 3)
+        self.assertEqual(boxes["grouping"], [3, 3, 3])
 
     def test_system_membership_matches_the_scan(self):
         ink, staves = self._load()
-        systems = {"sys1": [0, 1], "sys2": [2, 3, 4], "sys3": [5, 6, 7]}
-        for name, idxs in systems.items():
+        for name, idxs in P0020_SYSTEMS.items():
             sub = [staves[i] for i in idxs]
             groups = brace_groups(ink, sub)
             # Collect every staff a brace touches -- not just group starts,
@@ -208,24 +237,43 @@ class P0020RealImageTests(unittest.TestCase):
             got = sorted(idxs[i] for g in groups for i in g)
             self.assertEqual(got, P0020_BRACED[name], name)
 
-    def test_sys1_is_piano_only(self):
-        """Wilbur: the top of the song is piano hands alone."""
+    def test_sys1_voice_is_the_unbraced_top_staff(self):
+        """sys1 is NOT a piano introduction: lyrics sit under its top staff.
+
+        Evidence (tesseract on the band below staff 1): "gers. in man-y".
+        """
         ink, staves = self._load()
-        sub = [staves[i] for i in (0, 1)]
+        sub = [staves[i] for i in (0, 1, 2)]
         groups = brace_groups(ink, sub)
         covered = {i for g in groups for i in g}
-        self.assertEqual(covered, {0, 1})
+        self.assertEqual(covered, {1, 2})
+        self.assertEqual([i for i in range(3) if i not in covered], [0])
 
     def test_voice_is_the_unbraced_staff_in_sys2_and_sys3(self):
-        """Wilbur: "Slowly" above staff 3; sys3 repeats the shape."""
+        """Every system repeats the shape: singer above, piano braced below."""
         ink, staves = self._load()
-        for sys_no, base, count in ((2, 2, 3), (3, 5, 3)):
+        for sys_no, base, count in ((1, 0, 3), (2, 3, 3), (3, 6, 3)):
             sub = [staves[i] for i in range(base, base + count)]
             groups = brace_groups(ink, sub)
             covered = {i for g in groups for i in g}
             singer = [i for i in range(count) if i not in covered]
             self.assertEqual(singer, [P0020_SINGER["sys%d" % sys_no]],
                              "sys%d" % sys_no)
+
+    def test_the_raw_render_misleads_which_is_why_the_fixture_is_deskewed(self):
+        """Documented trap, not a wish: the raw render over-braces sys1.
+
+        The page's skew tilts the left system bracket into the margin window,
+        so ``brace_strokes`` reports one stroke spanning all three staves and
+        the singer is folded into the piano. This is why the fixture above uses
+        the deskewed image; it is also why a fixture "simplified" back to the
+        raw render would quietly assert the wrong grouping.
+        """
+        if not os.path.exists(self.RAW):
+            self.skipTest("raw render not present")
+        ink, staves = self._load(self.RAW)
+        sub = [staves[i] for i in (0, 1, 2)]
+        self.assertEqual(brace_groups(ink, sub), [[0, 1, 2]])
 
 
 if __name__ == "__main__":
