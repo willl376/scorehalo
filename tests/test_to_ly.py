@@ -23,9 +23,15 @@ from scorehalo.emit import parse_part
 
 
 def _REAL_PAGE():
-    """The assembled p0020 page, when the fragments are on disk."""
+    """The page production actually wrote, when it is on disk.
+
+    ``data/out-system/pages/p0020.musicxml`` is retired (the per-system path is
+    gone), so this pointed at a file that could never exist and two real tests
+    silently skipped even with LilyPond installed. ``PAGE-p0020.musicxml`` is the
+    per-staff artifact -- 2 parts (Voice, Piano), 12 bars each.
+    """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, "data", "out-system", "pages", "p0020.musicxml")
+    return os.path.join(root, "data", "out-perstaff", "PAGE-p0020.musicxml")
 from scorehalo.to_ly import (
     _render_event,
     _group_events,

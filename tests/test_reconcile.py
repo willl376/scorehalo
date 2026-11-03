@@ -5,7 +5,10 @@ agreement when the two counts actually differ, or that compares fields it has
 no business comparing. So most of these tests build two tallies that disagree
 in one specific way and assert the verdict names it.
 
-The p0020 tests need both homr runs on disk and skip without them.
+The p0020 two-run tests are ARCHIVAL: they need the per-system homr run, that
+path is retired and ``data/out-system`` is gone, so they skip by design. A skip
+is not a pass -- the module's own behaviour is covered by the synthetic cases in
+this file, which run anywhere.
 """
 
 import os
@@ -207,7 +210,8 @@ class TestReconcile(unittest.TestCase):
 class TestReconcileDirectories(unittest.TestCase):
     def test_pairs_by_basename(self):
         if not (os.path.isdir(PER_STAFF) and os.path.isdir(PER_SYSTEM)):
-            self.skipTest("both homr runs not present")
+            self.skipTest("per-system homr run retired (data/out-system is "
+                          "gone); this is an archival comparison")
         reports = reconcile.reconcile_directories(PER_STAFF, PER_SYSTEM)
         self.assertTrue(reports)
 
@@ -238,13 +242,21 @@ class TestReconcileDirectories(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.isdir(PER_STAFF) and os.path.isdir(PER_SYSTEM),
-                     "both homr runs not present")
+                     "per-system homr run retired (data/out-system is gone): "
+                     "this comparison is archival, see the class docstring")
 class TestP0020TwoRuns(unittest.TestCase):
     """The real corpus: per-staff crops against per-system crops.
 
     Two independent counts of one page. System 1 is expected to reconcile
     exactly; systems 2 and 3 are expected not to, which is the finding the
     whole module was built to make visible.
+
+    ARCHIVAL SINCE 2026-11-02. The per-system recognition path is retired, so
+    ``data/out-system`` no longer exists and these seven tests skip by design --
+    a skip, not a pass. They are kept because they record what the comparison
+    found on real data (and would run again if that directory were restored);
+    the module itself is covered synthetically by the classes above, and by
+    tests/test_reconcile.py's temp-dir disagreement cases.
     """
 
     #: s1+s2 = system 1, s3+s4+s5 = system 2, s6+s7+s8 = system 3.

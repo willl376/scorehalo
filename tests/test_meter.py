@@ -207,8 +207,10 @@ class TestRealPageP0020(unittest.TestCase):
     past that barline (128 -> 124), and reconciling the page meter got them
     back. That path is retired and its fixture directory is gone, so the old
     assertions measured a page that no longer exists -- and worse, they were
-    "passing" through ``_assemble_real_page`` returning an EMPTY page, whose
-    0 == 0 proves nothing.
+    "passing" through a shared helper that returned an EMPTY page once that
+    directory was gone, so they compared 0 == 0. That helper is deleted now
+    (see tests/test_emit_invariants.py); this class owns its own assembler
+    below, and it fails loudly if the fragments are absent.
 
     The per-staff fixture that ships tells a related but different story, and
     these tests now measure it: one declared meter (4/4, nothing to reconcile),

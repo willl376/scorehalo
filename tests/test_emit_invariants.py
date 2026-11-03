@@ -25,17 +25,29 @@ from scorehalo import preprocess  # noqa: E402
 from scorehalo.emit import (GLOBAL_DIVISIONS, Note, _TYPE, emit_page,  # noqa: E402
                             parse_part)
 from scorehalo.graph import Measure, Page, Part, Pitch  # noqa: E402
-from scorehalo.meter import reconcile_meter, resolve_page_meter  # noqa: E402
 
-SYSTEM_DIR = os.path.join(ROOT, "data", "out-system")
+SYSTEM_DIR = os.path.join(ROOT, "data", "out-perstaff")
 STEM = "p0020"
 
 
 def _fragments():
+    """The staff fragments that produced the shipped page, in staff order.
+
+    ``data/out-system`` (one fragment per system) is retired; production now
+    recognizes per staff and writes ``PAGE-<stem>.musicxml`` beside those
+    fragments. Reading the per-staff directory keeps this fixture honest -- an
+    absent directory yields [] and the class SKIPS, which is visible, rather
+    than passing on a page that was never built.
+    """
     d = os.path.join(SYSTEM_DIR, "homr", STEM)
     if not os.path.isdir(d):
         return []
-    return sorted(f for f in os.listdir(d) if f.endswith("_in.musicxml"))
+    return sorted(f for f in os.listdir(d)
+                  if f.startswith(STEM + ".s") and f.endswith("_in.musicxml"))
+
+
+def _shipped_page_path():
+    return os.path.join(SYSTEM_DIR, "PAGE-%s.musicxml" % STEM)
 
 
 def _root(xml_text):
@@ -248,52 +260,14 @@ def check_no_fabricated_parts(root, real_fragments):
 # Unit tests
 # --------------------------------------------------------------------------
 
-def _assemble_real_page(fragments=None, reconcile=True):
-    """Assemble the real page exactly the way build_page_graph does.
-
-    ``reconcile=False`` returns the page *before* scorehalo.meter runs, which is
-    how tests/test_meter.py reproduces the four-note loss it then proves is
-    fixed. Both states are worth testing; only one of them is what ships.
-    """
-    fragments = fragments if fragments is not None else _fragments()
-    sysdir = os.path.join(SYSTEM_DIR, "homr", STEM)
-    parts_by_role, order = {}, []
-    systems = []
-    for sysno, f in enumerate(fragments, start=1):
-        parts = parse_part(os.path.join(sysdir, f), system=sysno)
-        systems.append((sysno, parts))
-        for p in parts:
-            if p.name not in parts_by_role:
-                parts_by_role[p.name] = []
-                order.append(p.name)
-            parts_by_role[p.name].append(p)
-    page = Page(id=STEM, divisions=GLOBAL_DIVISIONS)
-    width = {s: max((len(p.measures) for p in ps), default=0)
-             for s, ps in systems}
-    for i, name in enumerate(order, start=1):
-        part = Part(id="P%d" % i, name=name, staff_index=i)
-        by_sys = {p.system: p for p in parts_by_role[name]}
-        for sysno, _ in systems:
-            if sysno in by_sys:
-                part.measures.extend(by_sys[sysno].measures)
-            else:
-                for _ in range(width[sysno]):
-                    part.measures.append(Measure(
-                        number=0, divisions=GLOBAL_DIVISIONS, is_empty=True))
-        page.parts.append(part)
-    for p in page.parts:
-        for n, m in enumerate(p.measures, start=1):
-            m.number = n
-    # Settle the meter page-wide and fix measures whose content overruns the
-    # meter their own fragment declared. build_page_graph.py does both; this
-    # helper used to skip them, so these tests measured the pre-fix behaviour
-    # while claiming to measure the real one -- and the four dropped notes stayed
-    # invisible here even after the production path had been fixed.
-    if reconcile:
-        resolve_page_meter(page)
-        reconcile_meter(page)
-    return page, order, len(systems)
-
+# REMOVED: _assemble_real_page(). It built the page itself from per-system
+# fragments and called scorehalo.meter by hand. That was the second assembler
+# which let these tests stay green while measuring pre-fix behaviour (the four
+# dropped notes stayed invisible here long after the production path was fixed),
+# and it is moot now that the per-system fixture directory is retired:
+# _fragments() returned [] there, so it assembled an EMPTY page and the note-count
+# test compared 0 == 0. tests/test_meter.py has its own per-staff assembler where
+# a deliberately UNFIXED page is still worth having.
 
 # NOTE: these must live at MODULE level. A TestCase nested inside another
 # TestCase is not discovered by `unittest discover` -- the first version of
@@ -301,15 +275,42 @@ def _assemble_real_page(fragments=None, reconcile=True):
 # "Ran 7 tests ... OK" while silently running none of the checks that touch
 # the real page. A green suite that is not testing what it claims to is worse
 # than no suite at all.
+#
+# The class below checks the artifact production wrote rather than rebuilding it,
+# for two reasons: the per-system fixture directory is retired, and a hand-rolled
+# second assembler is exactly how this file once measured pre-fix behaviour while
+# claiming to measure the shipping path. Ground truth -- how many fragments, how
+# many notes, how many systems -- is read from the fragments, so the assertions
+# cannot drift with the artifact.
 
 
-@unittest.skipUnless(_fragments(), "no system fragments on disk")
+@unittest.skipUnless(_fragments(), "no per-staff fragments on disk")
 class TestRealPage(unittest.TestCase):
     maxDiff = None
 
     def setUp(self):
-        self.page, self.order, self.nsystems = _assemble_real_page()
-        self.root = _root(emit_page(self.page))
+        path = _shipped_page_path()
+        if not os.path.exists(path):
+            self.skipTest("shipped PAGE-%s.musicxml not present" % STEM)
+        with open(path, encoding="utf-8") as fh:
+            self.root = _root(fh.read())
+        self.fragments = _fragments()
+        # This page is three staves per system (3+3+3); see tests/test_brace.py.
+        self.nsystems = len(self.fragments) // 3
+
+    def _fragment_note_total(self):
+        total = 0
+        for name in self.fragments:
+            path = os.path.join(SYSTEM_DIR, "homr", STEM, name)
+            for part in parse_part(path):
+                total += sum(1 for m in part.measures for n in m.notes
+                             if not n.is_rest)
+        return total
+
+    def _file_note_total(self):
+        return sum(1 for p in self.root.findall("part")
+                   for m in p.findall("measure")
+                   for n in m.findall("note") if n.find("rest") is None)
 
     def test_all_invariants_hold(self):
         for check in (check_parts_same_width, check_every_note_typed,
@@ -320,7 +321,8 @@ class TestRealPage(unittest.TestCase):
                 self.assertEqual(check(self.root), [])
 
     def test_roles_survive_assembly(self):
-        self.assertEqual(check_roles_preserved(self.root, self.order), [])
+        """One singer, one piano -- the voice is not folded into the piano."""
+        self.assertEqual(check_roles_preserved(self.root, ["Voice", "Piano"]), [])
 
     def test_duplicate_role_parts_are_rejected(self):
         """Two parts with the same role means the system bug is back.
@@ -340,15 +342,18 @@ class TestRealPage(unittest.TestCase):
 
     def test_not_one_part_per_fragment(self):
         n_parts = len(self.root.find("part-list").findall("score-part"))
-        self.assertLessEqual(n_parts, len(_fragments()))
+        self.assertLessEqual(n_parts, len(self.fragments))
 
-    def test_no_pitched_note_lost_between_graph_and_file(self):
-        in_graph = sum(1 for n in self.page.notes if not n.is_rest)
-        in_file = sum(1 for p in self.root.findall("part")
-                      for m in p.findall("measure")
-                      for n in m.findall("note") if n.find("rest") is None)
-        self.assertEqual(in_graph, in_file)
-        self.assertGreater(in_graph, 0)
+    def test_no_pitched_note_lost_between_fragments_and_file(self):
+        """The shipped page against the fragments' own count (183 here).
+
+        This compares the artifact to its inputs, not one rebuild to another: the
+        previous version of this test compared an empty page to itself (0 == 0)
+        once the fixture directory was retired, and could not fail.
+        """
+        in_file = self._file_note_total()
+        self.assertEqual(in_file, self._fragment_note_total())
+        self.assertGreater(in_file, 0)
 
     def test_no_measure_is_empty_xml(self):
         for p in self.root.findall("part"):
@@ -371,13 +376,12 @@ class TestRealPage(unittest.TestCase):
             "page is only %d bars for %d systems -- fragments are not being "
             "concatenated in reading order" % (longest, self.nsystems))
 
-    def test_absent_role_is_silent_not_missing(self):
-        """A role absent from a system contributes bars, not a gap.
+    def test_every_part_spans_the_same_bars(self):
+        """Parts sound together: a short part is malformed, not terse.
 
-        Parts sound simultaneously, so a role that is not printed on the intro
-        system must still occupy that system's bars with silence. Otherwise the
-        following system's music slides earlier in time and every bar after the
-        gap is misaligned.
+        Also the shape the "absent role" rule protects -- a role not printed on
+        a system must still occupy that system's bars with silence, or every bar
+        after the gap slides early for that part alone.
         """
         for p in self.root.findall("part"):
             nums = [int(m.get("number")) for m in p.findall("measure")]
@@ -385,13 +389,6 @@ class TestRealPage(unittest.TestCase):
             self.assertEqual(nums, list(range(1, len(nums) + 1)))
         widths = {len(p.findall("measure")) for p in self.root.findall("part")}
         self.assertEqual(len(widths), 1, "parts of unequal width: %s" % widths)
-
-        def test_not_one_part_per_fragment(self):
-            page, _order, _nsys = self._page()
-            root = _root(emit_page(page))
-            n_parts = len(root.find("part-list").findall("score-part"))
-            self.assertLessEqual(n_parts, len(self.fragments))
-            self.assertGreaterEqual(n_parts, 1)
 
 
 class TestCheckersCatchRegressions(unittest.TestCase):
