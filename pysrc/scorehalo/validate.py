@@ -36,10 +36,11 @@ def _schema_errors(root):
                     errs.append(
                         f"m{num}: <note> has neither <pitch>, <rest> nor <unpitched>")
                 tm = note.find("time-modification")
-                if tm is not None and tm.find("type") is None:
+                if tm is not None and note.find("type") is None:
                     errs.append(
-                        f"m{num}: <time-modification> without the required <type> "
-                        "(musicxml2ly raises TypeError on this)")
+                        f"m{num}: tuplet note without a <type> "
+                        "(the note type is a sibling of <time-modification>, "
+                        "not a child; without it the printed value is ambiguous)")
 
     starts = stops = 0
     for slur in root.findall(".//slur"):
