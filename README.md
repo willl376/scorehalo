@@ -215,6 +215,79 @@ The cost is a denser layout: 16 source pages render as 24, so
 `scorehalo compare`'s index-based page-to-page mapping no longer lines up and
 its "defect" verdicts are misalignment rather than transcription errors.
 
+## Clef/staff audit
+
+`scorehalo validate --clefs dir` runs a read-only clef/staff semantic audit on
+each MusicXML file, separate from structural validation. It tracks clef
+declarations per measure, assigns an active clef to every pitched note by
+musical onset (measure inheritance, mid-measure change, voice/`<backup>` order,
+grace notes, `additional="yes"`, `print-object="no"`, octave change), and reports
+findings instead of guessing:
+
+| Finding code | Meaning |
+|---|---|
+| `clef_staff_invalid` | Clef references an undeclared or out-of-range staff |
+| `clef_sign_invalid` | Missing or unsupported clef sign |
+| `clef_line_invalid` | Clef line is not a positive integer |
+| `clef_line_unspecified` | Clef sign present but line omitted (info only) |
+| `clef_conflict` | Different primary clefs at the same score time — **one finding per conflicting time, not one per note** |
+| `clef_unresolved` | No unambiguous active clef for a pitched note; inspect source and timing |
+| `clef_note_staff_invalid` | Note references an undeclared or invalid staff |
+
+Conflict dedupe: if measure 1 has both a G2 and an F4 clef at onset 0, that is
+**one** `clef_conflict` finding, not one per note. Unresolved clefs are
+deduplicated per (staff, measure).
+
+Example output:
+```
+scorehalo validate --clefs dir
+  p0020.musicxml clef[warning] clef_conflict: Different primary clefs at the same score time (part=P1, measure=1, staff=1)
+  p0020.musicxml clef[warning] clef_unresolved: No unambiguous active clef; inspect source and timing (part=P2, measure=3, staff=1)
+```
+
+## verification.json schema
+
+The review build at `~/scorehalo` writes a `verification.json` per run with this
+schema (verified against the saved Carpenters p12 run):
+
+```json
+{
+  "source_review": "not_performed",
+  "joined": "score.musicxml",
+  "join_error": null,
+  "pages": [
+    {
+      "index": 1,
+      "source": "/path/to/page-0001.png",
+      "clefs": {
+        "declarations": [
+          {"part": "P1", "measure": "1", "staff": 1, "sign": "G", "line": "2", ...},
+          {"part": "P1", "measure": "1", "staff": 2, "sign": "F", "line": "4", ...},
+          {"part": "P2", "measure": "1", "staff": 1, "sign": "G", "line": "2", ...}
+        ],
+        "note_assignments": [
+          {"part": "P1", "measure": "1", "onset": "0", "staff": "1", "voice": "1", "pitched": true, "clef": {...}, "clef_origin": "declared_this_measure"},
+          ...
+        ],
+        "findings": [...]
+      },
+      "events": [...],
+      "findings": [...]
+    }
+  ]
+}
+```
+
+Key guarantee: **no automated check compares a transcription to the scan.**
+`source_review: "not_performed"` means the accuracy claim is structural only —
+note counts, clef declarations, and timing consistency are verified, but whether
+the pitches match the printed page requires human review against the source
+image.
+
+`clefs.note_assignments` carries full per-note detail (clef resolution,
+origin, pitch). `summary()` (used in manifests) keeps only findings and
+counts — a one-page manifest is ~4 KB with summary vs ~160 KB without.
+
 ## Measuring accuracy
 
 `validate` only proves the MusicXML is well-formed, not that the notes are
@@ -259,9 +332,12 @@ this is the easy end of the range, not real-book accuracy.
 
 - `pysrc/scorehalo/`  — the package
   - `cli.py` convert/validate/join/score/serve
+  - `clefs.py` read-only clef/staff audit: declarations, per-note assignments, conflict dedupe
   - `pdf.py`  pypdfium2 rendering
   - `preprocess.py` restorer + photo/not-music gate
+  - `storage.py` atomic UTF-8/JSON writes
   - `triage.py`  page statistics (colorfulness, ink, staff-line density)
+  - `verification.py` timing diagnostics + clef integration + compact summary()
   - `layout.py`  CV layout: deskew, staff-line detection, sliver removal,
                  staff grouping, bracket-based system grouping, per-staff crops
   - `engine.py`  homr wrapper

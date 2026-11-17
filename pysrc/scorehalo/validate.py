@@ -97,3 +97,14 @@ def validate(xml_path):
 
     report["ok"] = not report["errors"]
     return report["ok"], report
+
+
+def validate_clefs(text: str) -> list[dict]:
+    """Read-only semantic clef/staff diagnostics, separate from structural acceptance.
+
+    Reports clef declaration conflicts, unresolved assignments, invalid staff/line/sign,
+    and unbalanced timing -- without repairing anything. Complements
+    :func:`validate` which checks well-formedness and structure.
+    """
+    from .clefs import audit_clefs
+    return audit_clefs(text)["findings"]

@@ -286,6 +286,7 @@ def cmd_join(args):
 
 def cmd_validate(args):
     total = ok = fail = 0
+    clef_total = clef_findings = 0
     for xml in sorted(glob.glob(os.path.join(args.out_dir, "*.musicxml"))):
         total += 1
         fine, rep = validate.validate(xml)
@@ -294,7 +295,16 @@ def cmd_validate(args):
         else:
             fail += 1
             print(f"{os.path.basename(xml)}: " + "; ".join(rep["errors"]))
+        if args.clefs:
+            findings = validate.validate_clefs(open(xml, encoding="utf-8").read())
+            clef_total += 1
+            clef_findings += len(findings)
+            for f in findings:
+                print(f"  {os.path.basename(xml)} clef[{f.get('severity','?')}] {f.get('code')}: {f.get('message')} "
+                      f"(part={f.get('part')}, measure={f.get('measure')}, staff={f.get('staff')})")
     print(f"{ok}/{total} valid MusicXML outputs")
+    if args.clefs:
+        print(f"clef audit: {clef_findings} finding(s) across {clef_total} file(s)")
     return 0 if fail == 0 else 1
 
 
@@ -396,6 +406,7 @@ def main(argv=None):
     val = sub.add_parser("validate", help="re-check MusicXML outputs in an out dir")
     val.add_argument("out_dir")
     val.add_argument("--all", action="store_true", help="also validate skipped/failed entries files")
+    val.add_argument("--clefs", action="store_true", help="also run clef/staff semantic audit on each file")
     val.set_defaults(fn=cmd_validate)
 
     join_cmd = sub.add_parser("join", help="assemble per-page MusicXML into one score + .mxl")
