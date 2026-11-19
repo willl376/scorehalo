@@ -1,0 +1,130 @@
+{
+  "date": "2026-11-19",
+  "policy": "pair LIFO per (part, staff, voice, slur number); drop orphans; preserve source number",
+  "songs": 6,
+  "starts_before": 424,
+  "stops_before": 434,
+  "pairs": 390,
+  "orphans_dropped": 78,
+  "verovio_warnings_before": 39,
+  "verovio_warnings_after": 0,
+  "validator_ok_after": 6,
+  "musescore_rc_zero": 6,
+  "all_note_fingerprints_unchanged": true,
+  "controls": {
+    "serialize_only_for_all_we_know": {
+      "validator": "BAD (unbalanced)",
+      "verovio_warnings": 13,
+      "musescore_rc": 0
+    },
+    "strip_all_slurs_for_all_we_know": {
+      "validator": "OK",
+      "verovio_warnings": 0,
+      "musescore_rc": 0,
+      "slurs_removed": 233
+    },
+    "global_renumber": {
+      "close_to_you_musescore_rc": 139
+    },
+    "per_stream_renumber": {
+      "songs_ok": 5,
+      "songs_crashed": 1,
+      "crash": "for-all-we-know rc=-11"
+    },
+    "flat_per_stream_renumber": {
+      "for_all_we_know_rc": -11,
+      "i_need_to_be_in_love_verovio_warnings": 1
+    },
+    "preserve_numbers": {
+      "songs_ok": 6,
+      "musescore_rc_zero": 6,
+      "verovio_warnings": 0
+    }
+  },
+  "rows": [
+    {
+      "name": "close-to-you",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 12,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 5",
+      "musescore_rc": 0,
+      "starts": 77,
+      "stops": 89,
+      "pairs": 75,
+      "orphans": 16,
+      "notes_unchanged": true
+    },
+    {
+      "name": "for-all-we-know",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 13,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 7",
+      "musescore_rc": 0,
+      "starts": 121,
+      "stops": 112,
+      "pairs": 99,
+      "orphans": 35,
+      "notes_unchanged": true
+    },
+    {
+      "name": "goodbye-to-love",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 2,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 4",
+      "musescore_rc": 0,
+      "starts": 70,
+      "stops": 69,
+      "pairs": 65,
+      "orphans": 9,
+      "notes_unchanged": true
+    },
+    {
+      "name": "i-just-fall-in-love-again",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 4,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 4",
+      "musescore_rc": 0,
+      "starts": 34,
+      "stops": 36,
+      "pairs": 32,
+      "orphans": 6,
+      "notes_unchanged": true
+    },
+    {
+      "name": "i-need-to-be-in-love",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 2,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 4",
+      "musescore_rc": 0,
+      "starts": 24,
+      "stops": 25,
+      "pairs": 22,
+      "orphans": 5,
+      "notes_unchanged": true
+    },
+    {
+      "name": "i-won-t-last-a-day-without-you",
+      "before_val": "BAD 1",
+      "after_val": "OK 0",
+      "verovio_warnings_before": 6,
+      "verovio_warnings_after": 0,
+      "pages": "PAGES 4",
+      "musescore_rc": 0,
+      "starts": 98,
+      "stops": 103,
+      "pairs": 97,
+      "orphans": 7,
+      "notes_unchanged": true
+    }
+  ]
+}

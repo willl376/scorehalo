@@ -245,6 +245,28 @@ scorehalo validate --clefs dir
   p0020.musicxml clef[warning] clef_unresolved: No unambiguous active clef; inspect source and timing (part=P2, measure=3, staff=1)
 ```
 
+## Slur repair (opt-in)
+
+OMR slurs often arrive unbalanced (`unbalanced slurs: N start vs M stop`).
+`scripts/repair_slurs.py` is a conservative post-processing step:
+
+```
+python scripts/repair_slurs.py score.musicxml --out score.slurs.musicxml \
+    --report score.slurs.json
+```
+
+It pairs `stop`s with the most recent unmatched `start` inside the same
+`(part, staff, voice, number)` stream, drops orphans, and records every drop.
+It never invents a mark, changes a note, or renumbers a pair. The source
+`number` is preserved deliberately: in the 2026-11-19 A/B, renumbering
+otherwise identical pairs made MuseScore 3.6.2 segfault on two real songs,
+while preserving the number paired them with rc=0 on all six. See
+`reports/slur-honesty.md` for the controls and per-song numbers.
+
+Clean validation and a successful import prove only structural well-formedness;
+they are not a source-accuracy check. The repair is opt-in — the recognition and
+assembly path is unchanged.
+
 ## verification.json schema
 
 The review build at `~/scorehalo` writes a `verification.json` per run with this
@@ -397,7 +419,8 @@ made by either A/B.
 - `scripts/per_staff_assemble.py` + `scripts/build_page_graph.py`  fragments -> one assembled two-part PAGE
 - `scripts/stitch_songs.py`   a page range -> one song (cross-page rests inherit per-position meters)
 - `scripts/validate_musicxml.py`  strict gate: cursor arithmetic, `<staves>` vs `<staff>`, meter inheritance
-- `tests/`  **491 unit tests** — `.venv/bin/python -m pytest tests/ -q`
+- `scripts/repair_slurs.py`  opt-in slur pairing/orphan drop; preserves numbers (see `reports/slur-honesty.md`)
+- `tests/`  **592 unit tests, 7 skipped** — `.venv/bin/python -m unittest discover -s tests -q`
 - `data/out-test/` example output on "Carpenters Gold Songbook 1972" pages 20-22
 
 ### Experimental: direct PDF geometry (not wired)
