@@ -143,18 +143,13 @@ def cmd_convert(args):
     for n, img in items:
         entry = {"page": n, "image": img, "status": "pending"}
         print(f"[p{n}] load {os.path.basename(img)}")
-        music_ok, stats_note, _verdict = preprocess.is_music_page(img)
-        entry["stats"] = stats_note if isinstance(stats_note, dict) else {"note": stats_note}
-        if not music_ok:
-            entry["status"] = "skipped-not-music"
-            print(f"[p{n}] {stats_note}")
-            manifest["pages"].append(entry)
-            continue
 
-        # Bypass pictured graphics *inside* a music page before the engine sees
-        # it. Here there is no staff geometry yet (this path hands the page to
-        # homr), so every detected picture goes -- the page-level gate above
-        # already removed pages that are wholly a picture.
+        # Bypass pictured graphics *inside* a music page BEFORE the page gate.
+        # This order is load-bearing: the gate counts smooth mid-tone pixels,
+        # so an illustrated music page is otherwise mislabelled "pictured
+        # graphic" and skipped before the mask ever gets a chance. A picture
+        # covering the whole page touches the border, is not found here, and
+        # still reaches the gate unchanged -- so covers are still skipped.
         engine_src = img
         gray = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
         if getattr(args, "no_mask_graphics", False):
@@ -174,6 +169,17 @@ def cmd_convert(args):
                     # must not end because one masked copy could not be saved.
                     print(f"[p{n}] WARN: could not write {masked_path}; "
                           "running on the unmasked page")
+
+        if getattr(args, "no_photo_gate", False):
+            entry["photo_gate"] = "disabled (--no-photo-gate)"
+        else:
+            music_ok, stats_note, _verdict = preprocess.is_music_page(engine_src)
+            entry["stats"] = stats_note if isinstance(stats_note, dict) else {"note": stats_note}
+            if not music_ok:
+                entry["status"] = "skipped-not-music"
+                print(f"[p{n}] {stats_note}")
+                manifest["pages"].append(entry)
+                continue
 
         # optional enhancement pass produces the actual engine input
         engine_img = engine_src
@@ -416,6 +422,10 @@ def main(argv=None):
     conv.add_argument("--no-mask-graphics", action="store_true",
                       help="A/B only: feed pictured regions to the engine "
                            "instead of masking them")
+    conv.add_argument("--no-photo-gate", action="store_true",
+                      help="A/B only: do not skip pages that look pictured; "
+                           "used with --no-mask-graphics to score an "
+                           "illustrated fixture note by note")
     conv.add_argument("--timeout", type=int, default=600)
     conv.set_defaults(fn=cmd_convert)
 

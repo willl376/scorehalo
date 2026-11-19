@@ -45,6 +45,8 @@ import xml.etree.ElementTree as ET
 from fractions import Fraction
 from io import BytesIO
 
+import cv2
+import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image, ImageEnhance, ImageFilter
 
@@ -273,14 +275,44 @@ def jpeg_roundtrip(im, quality):
         return decoded.convert("RGB")
 
 
+def add_illustration(im, box=None):
+    """Paste a smooth mid-tone picture into a music page (in place).
+
+    The detector's own rule is the inverse of "pictures are busy": on a
+    photocopy a photograph is a SMOOTH MID-TONE region, while notation is thin
+    near-black ink on near-white paper. This patch has a shallow gradient and
+    faint low-frequency texture, but stays far inside the detector's band
+    (mean ~139, std ~12 vs PHOTO_MAX_STD=28), so it is an honest positive case
+    for the mask, not a hand-picked black rectangle.
+
+    ``box`` is ``(x, y, w, h)`` in pixels. The default sits well below the two
+    staves of the six-measure labelled fixture; callers using other layouts
+    should check the boxes before trusting an A/B run.
+    """
+    if box is None:
+        w, h = im.size
+        x, y = int(0.28 * w), int(0.37 * h)
+        box = (x, y, int(0.42 * w), int(0.19 * h))
+    x, y, bw, bh = box
+    yy, xx = np.mgrid[0:bh, 0:bw]
+    patch = 115 + 0.06 * yy + 0.01 * xx + 8 * np.sin(xx / 90) * np.cos(yy / 70)
+    patch = cv2.GaussianBlur(patch.astype(np.uint8), (0, 0), 2)
+    pixels = np.asarray(im.convert("RGB")).copy()
+    pixels[y:y + bh, x:x + bw] = np.dstack([patch] * 3)
+    return Image.fromarray(pixels), (x, y, bw, bh)
+
+
 def degrade(png, out_png, mode="scan", seed=7):
-    if mode not in {"none", "light", "scan"}:
+    if mode not in {"none", "light", "scan", "illustration"}:
         raise ValueError(f"unknown degradation mode: {mode}")
     with Image.open(png) as src:
         im = src.convert("RGB")
     rng = random.Random(seed)
     meta = {"mode": mode, "seed": seed, "in_size": list(im.size)}
     w, h = im.size
+    illustrated = mode == "illustration"
+    if illustrated:
+        mode = "scan"                    # the picture sits on a real scan
 
     if mode == "none":
         im.save(out_png, format="PNG")
@@ -307,6 +339,9 @@ def degrade(png, out_png, mode="scan", seed=7):
             px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)),
                         max(0, min(255, b + n)))
         im = jpeg_roundtrip(im, jpeg_q)
+        if illustrated:
+            im, box = add_illustration(im)  # on the scan, after JPEG artefacts
+            meta["illustration_box"] = list(box)
         im.save(out_png, format="PNG")
         meta.update(noise_operations=dots, rotation_deg=round(angle, 3),
                     blur_radius=blur, contrast=contrast, brightness=brightness,
@@ -329,7 +364,8 @@ def main():
     ap.add_argument("--out", default="data/fixtures")
     ap.add_argument("--name", default="page001")
     ap.add_argument("--measures", type=int, default=4)
-    ap.add_argument("--degrade", default="scan", choices=["scan", "light", "none"])
+    ap.add_argument("--degrade", default="scan",
+                    choices=["scan", "light", "none", "illustration"])
     ap.add_argument("--musescore",
                     default=os.path.expanduser("~/.local/opt/musescore/bin/mscore4portable"))
     args = ap.parse_args()

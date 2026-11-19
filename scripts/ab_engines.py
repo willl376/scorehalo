@@ -104,14 +104,14 @@ def _write_log(outdir, argv, proc):
 
 
 def run_scorehalo(image, outdir, timeout=900, runner=subprocess.run,
-                  python=None):
+                  python=None, extra_args=()):
     """Recognize one image with the production whole-page CLI arm."""
     os.mkdir(outdir)                            # fresh; never inherit output
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [os.path.join(ROOT, "pysrc"), env.get("PYTHONPATH", "")])
     argv = [python or sys.executable, "-m", "scorehalo.cli", "convert", image,
-            "-o", outdir, "--pages", "1"]
+            "-o", outdir, "--pages", "1", *extra_args]
     proc = runner(argv, cwd=ROOT, env=env, capture_output=True,
                   text=True, timeout=timeout)
     _write_log(outdir, argv, proc)

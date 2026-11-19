@@ -328,6 +328,43 @@ void; the recognizer never had that error class.
 Caveat that survives: fixtures are clean engravings at moderate degradation, so
 this is the easy end of the range, not real-book accuracy.
 
+### Paired engine A/B and the picture-mask A/B
+
+Engine agreement is not truth, but two engines disagreeing is a useful review
+signal. `scripts/ab_engines.py` runs ScoreHalo and the locally patched Audiveris
+on the **same** labelled fixture image, in fresh directories, checks the return
+code before scoring, and records truth/image/prediction SHA-256:
+
+```
+python scripts/ab_engines.py --cases scan --measures 6 --seed 7 \
+    --musescore ~/.local/opt/musescore-3.6.2/bin/mscore-362-local \
+    --json reports/ab-engines.json
+```
+
+Smoke run (`20261119-074316-99pe3d2m`): both arms scored **37/37 exact**
+(100% precision/recall, zero pitch or duration errors); ScoreHalo 31.1 s,
+Audiveris 24.9 s. Reports: `reports/ab-engines.{json,md}`.
+
+`scripts/ab_mask.py` is the narrower control for the advertised picture
+tolerance: one labelled scan with a smooth mid-tone picture pasted below the
+staves, recognized twice by the same ScoreHalo CLI, once with the default mask
+and once with `--no-mask-graphics --no-photo-gate`. The gate flag is necessary
+because the page gate counts picture-like pixels and would otherwise skip the
+control before it could be scored. The detector's box and every SHA are in the
+report.
+
+Measurement (`20261119-080858-67wha267`): the picture covered 7.7% of the page
+and was detected; both arms scored **37/37 exact**, delta **+0**
+(`reports/mask-ab.{json,md}`). The A/B exposed a real ordering bug on the way:
+the old `convert` gate ran *before* masking and skipped the illustrated page
+outright, so masking now runs first. Covers whose picture touches the page edge
+are not found by the region detector and still reach the gate unchanged.
+
+Equal note scores do **not** prove masking harmless on real photographs, so the
+production per-staff pipeline keeps `--mask-graphics` **opt-in**; only the
+legacy whole-page `convert` path masks by default. No source-accuracy claim is
+made by either A/B.
+
 ## Layout
 
 - `pysrc/scorehalo/`  — the package
@@ -348,8 +385,10 @@ this is the easy end of the range, not real-book accuracy.
   - `ui.py`      stdlib review web UI
   - `score.py`   note-level accuracy diff (pitch/duration, chord-order blind)
   - `compare.py` MuseScore faithful-twin render + structural diff vs source pages
-- `scripts/make_fixture.py`  labeled fixture: known music -> degraded scan PNG
+- `scripts/make_fixture.py`  labeled fixture: known music -> degraded scan PNG (also `illustration` mode with a detectable picture)
 - `scripts/bench_fixtures.py` run fixtures through convert and score them
+- `scripts/ab_engines.py`   paired ScoreHalo vs Audiveris note-level A/B
+- `scripts/ab_mask.py`      paired picture-mask on/off note-level A/B
 - `scripts/validate_layout.py`  arithmetic audit of detected staves (5 lines, even spacing)
 - `scripts/layout_audit.py`   detector vs homr staff counts across a run
 - `scripts/crop_probe.py`     system vs per-staff crop experiment (measures note yield; its old "recovered N of N staves" verdict was withdrawn — see above)

@@ -1,0 +1,142 @@
+{
+  "run_id": "20261119-080858-67wha267",
+  "row": {
+    "case": "illustration",
+    "measures": 6,
+    "seed": 7,
+    "arms": {
+      "masked": {
+        "rc": 0,
+        "pred": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/masked/p0001.musicxml",
+        "log": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/masked/engine.log",
+        "stderr_tail": "",
+        "seconds": 30.8,
+        "truth_notes": 37,
+        "pred_notes": 37,
+        "exact": 37,
+        "exact_precision": 100.0,
+        "exact_recall": 100.0,
+        "pitch_wrong": 0,
+        "duration_wrong": 0,
+        "both_wrong": 0,
+        "missed": 0,
+        "spurious": 0,
+        "streams": {
+          "(0, '1', '1')": {
+            "truth_notes": 25,
+            "pred_notes": 25,
+            "exact": 25,
+            "pitch_wrong": 0,
+            "duration_wrong": 0,
+            "both_wrong": 0,
+            "missed": 0,
+            "spurious": 0,
+            "pitch_class_only": 0
+          },
+          "(0, '2', '5')": {
+            "truth_notes": 12,
+            "pred_notes": 12,
+            "exact": 12,
+            "pitch_wrong": 0,
+            "duration_wrong": 0,
+            "both_wrong": 0,
+            "missed": 0,
+            "spurious": 0,
+            "pitch_class_only": 0
+          }
+        },
+        "pred_sha256": "33b7acef707ba23858060fa782c28c28b27182e118178e0ec7ddbcde9e40952d",
+        "mask_logged": true
+      },
+      "unmasked": {
+        "rc": 0,
+        "pred": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/unmasked/p0001.musicxml",
+        "log": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/unmasked/engine.log",
+        "stderr_tail": "",
+        "seconds": 32.2,
+        "truth_notes": 37,
+        "pred_notes": 37,
+        "exact": 37,
+        "exact_precision": 100.0,
+        "exact_recall": 100.0,
+        "pitch_wrong": 0,
+        "duration_wrong": 0,
+        "both_wrong": 0,
+        "missed": 0,
+        "spurious": 0,
+        "streams": {
+          "(0, '1', '1')": {
+            "truth_notes": 25,
+            "pred_notes": 25,
+            "exact": 25,
+            "pitch_wrong": 0,
+            "duration_wrong": 0,
+            "both_wrong": 0,
+            "missed": 0,
+            "spurious": 0,
+            "pitch_class_only": 0
+          },
+          "(0, '2', '5')": {
+            "truth_notes": 12,
+            "pred_notes": 12,
+            "exact": 12,
+            "pitch_wrong": 0,
+            "duration_wrong": 0,
+            "both_wrong": 0,
+            "missed": 0,
+            "spurious": 0,
+            "pitch_class_only": 0
+          }
+        },
+        "pred_sha256": "33b7acef707ba23858060fa782c28c28b27182e118178e0ec7ddbcde9e40952d",
+        "control_logged": true
+      }
+    },
+    "truth": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/fixture/illustrated_m6_s7_truth.musicxml",
+    "pdf": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/fixture/illustrated_m6_s7_truth.pdf",
+    "image": "/home/wburt59/scorehalo-upstream/data/mask-runs/20261119-080858-67wha267/fixture/illustrated_m6_s7.png",
+    "degrade": {
+      "mode": "illustration",
+      "seed": 7,
+      "in_size": [
+        2480,
+        3509
+      ],
+      "illustration_box": [
+        694,
+        1298,
+        1041,
+        666
+      ],
+      "noise_operations": 13053,
+      "rotation_deg": -0.123,
+      "blur_radius": 0.6,
+      "contrast": 0.86,
+      "brightness": 1.04,
+      "resample_ratio": 0.6666666666666666,
+      "jpeg_quality": 38,
+      "out_size": [
+        2480,
+        3509
+      ]
+    },
+    "detected_regions": [
+      {
+        "box": [
+          691,
+          1295,
+          1048,
+          673
+        ],
+        "area_frac": 0.0774,
+        "fill": 1.0
+      }
+    ],
+    "sha256": {
+      "truth": "37e277b0dd91e7344f0ac6387147ce119c036663aa2903422ab3c6846343ed12",
+      "pdf": "400bd785b7fae7fcce2b4c21ceb8a8b05d092359c496c8163ae93fb0b4055592",
+      "image": "7ab02feb93a7a3d0ae4e65bf5d42ba2e32515fefeeb61747a9c33a9a575c9918"
+    },
+    "delta_exact": 0
+  }
+}
