@@ -99,7 +99,17 @@ def require_input_file(path):
     raise SystemExit(2)
 
 
+def _deprecated(verb, alternative):
+    """Say plainly when a verb is legacy, without refusing to run it.
+
+    Gating it behind a flag would break the fixture benchmark (which drives
+    ``convert`` as a black-box CLI), so we warn instead of blocking.
+    """
+    print(f"scorehalo: '{verb}' is DEPRECATED; {alternative}", file=sys.stderr)
+
+
 def cmd_convert(args):
+    _deprecated("convert", "use the per-staff pipeline in scripts/per_staff_all.py")
     args.out = resolve_path(args.out)
     src = require_input_file(args.input)
     if src.lower().endswith(".pdf"):
@@ -281,6 +291,7 @@ def _do_join(out_dir, allow_partial=False):
 
 
 def cmd_join(args):
+    _deprecated("join", "use scripts/per_staff_assemble.py + scripts/stitch_songs.py")
     return 0 if _do_join(args.out_dir, getattr(args, "allow_partial", False)) else 1
 
 

@@ -53,6 +53,25 @@ document.addEventListener('click', ev => { const pre = ev.target.closest('detail
 """
 
 
+def _safe_path(rel, root=None):
+    """Resolve a manifest path inside ``root``, or return None for escapes.
+
+    ``str.startswith`` is not enough: /tmp/out-extra also starts with /tmp/out,
+    yet it is a different directory. ``commonpath`` compares whole components.
+    """
+    if not rel:
+        return None
+    base = os.path.realpath(root or os.getcwd())
+    cand = os.path.realpath(
+        os.path.expanduser(rel) if os.path.isabs(rel) else os.path.join(base, rel))
+    try:
+        if os.path.commonpath([base, cand]) != base:
+            return None
+    except ValueError:  # different drives (Windows)
+        return None
+    return cand
+
+
 def _load_manifest(out_dir):
     man_path = os.path.join(out_dir, "manifest.json")
     if os.path.exists(man_path):
@@ -69,7 +88,7 @@ def _load_manifest(out_dir):
     return {"source": out_dir, "pages": pages}
 
 
-def serve_ui(out_dir, port=8001, render_root="/"):
+def serve_ui(out_dir, port=8001, render_root="/", host="127.0.0.1"):
     data = _load_manifest(out_dir)
     os.chdir(out_dir)  # serve all files relative to the out dir
 
@@ -86,9 +105,8 @@ def serve_ui(out_dir, port=8001, render_root="/"):
                 return
             if parsed.path == "/file":
                 q = urllib.parse.parse_qs(parsed.query)
-                fp = q.get("p", [""])[0]
-                fp = os.path.abspath(fp)
-                if not fp.startswith(os.getcwd()):
+                fp = _safe_path(q.get("p", [""])[0], os.getcwd())
+                if fp is None:
                     self.send_response(403); self.end_headers(); return
                 try:
                     with open(fp, "rb") as fh:
@@ -107,8 +125,9 @@ def serve_ui(out_dir, port=8001, render_root="/"):
         def log_message(self, fmt, *args):  # quiet
             pass
 
-    with socketserver.TCPServer(("", port), Handler) as httpd:
-        print(f"ScoreHalo review UI: http://127.0.0.1:{port}  (Ctrl-C to stop)")
+    # Loopback only: the review UI serves scans and scores, and has no auth.
+    with socketserver.TCPServer((host, port), Handler) as httpd:
+        print(f"ScoreHalo review UI: http://{host}:{port}  (Ctrl-C to stop)")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

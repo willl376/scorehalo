@@ -52,6 +52,26 @@ def _schema_errors(root):
     if starts != stops:
         errs.append(f"unbalanced slurs: {starts} start vs {stops} stop")
 
+    # A part id is the only link between <part-list> and the music. If the two
+    # disagree, a consumer may silently drop a staff (or invent a part), so this
+    # is a structural error, not a cosmetic warning. Duplicates are reported too.
+    part_list = root.find("part-list")
+    declared = ([sp.get("id") for sp in part_list.findall("score-part")]
+                if part_list is not None else [])
+    used = [p.get("id") for p in root.findall("part")]
+    for ids, label in ((declared, "score-part"), (used, "part")):
+        counts = collections.Counter(i for i in ids if i is not None)
+        for pid, n in sorted(counts.items()):
+            if n > 1:
+                errs.append(f"duplicate {label} id {pid!r} (x{n})")
+    if part_list is not None:
+        for pid in used:
+            if pid is not None and pid not in declared:
+                errs.append(f"part id {pid!r} has no <score-part> declaration")
+        for pid in declared:
+            if pid is not None and pid not in used:
+                errs.append(f"<score-part id={pid!r}> has no <part>")
+
     tally = collections.Counter(errs)
     return [f"{msg} (x{n})" if n > 1 else msg for msg, n in tally.items()]
 

@@ -86,5 +86,59 @@ class TupletTypeTests(unittest.TestCase):
             report["errors"])
 
 
+def _score_ids(part_list, parts):
+    """A minimal score with chosen <score-part>/<part> ids."""
+    declarations = "".join(
+        f'<score-part id="{pid}"><part-name>{pid}</part-name></score-part>'
+        for pid in part_list)
+    body = "".join(
+        f'<part id="{pid}"><measure number="1">'
+        '<note><pitch><step>C</step><octave>4</octave></pitch>'
+        '<duration>4</duration><type>whole</type></note>'
+        '</measure></part>' for pid in parts)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<score-partwise version="4.0">'
+        f'<part-list>{declarations}</part-list>{body}'
+        '</score-partwise>\n')
+
+
+class PartIdTests(unittest.TestCase):
+
+    def _check(self, xml):
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".musicxml", delete=False) as fh:
+            fh.write(xml)
+            path = fh.name
+        try:
+            return validate(path)
+        finally:
+            os.unlink(path)
+
+    def test_matching_ids_are_valid(self):
+        ok, report = self._check(_score_ids(["P1", "P2"], ["P1", "P2"]))
+        self.assertTrue(ok, report["errors"])
+
+    def test_part_without_declaration_is_reported(self):
+        ok, report = self._check(_score_ids(["P1"], ["P1", "P2"]))
+        self.assertFalse(ok)
+        self.assertTrue(any("part id 'P2' has no" in e for e in report["errors"]),
+                        report["errors"])
+
+    def test_declaration_without_part_is_reported(self):
+        ok, report = self._check(_score_ids(["P1", "P3"], ["P1"]))
+        self.assertFalse(ok)
+        self.assertTrue(any("<score-part id='P3'> has no" in e
+                            for e in report["errors"]), report["errors"])
+
+    def test_duplicate_ids_are_reported(self):
+        ok, report = self._check(_score_ids(["P1", "P1"], ["P1", "P1"]))
+        self.assertFalse(ok)
+        self.assertTrue(any("duplicate score-part id 'P1'" in e
+                            for e in report["errors"]), report["errors"])
+        self.assertTrue(any("duplicate part id 'P1'" in e
+                            for e in report["errors"]), report["errors"])
+
+
 if __name__ == "__main__":
     unittest.main()
