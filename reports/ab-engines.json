@@ -1,0 +1,126 @@
+{
+  "run_id": "20261119-074316-99pe3d2m",
+  "measures": 6,
+  "seed": 7,
+  "rows": [
+    {
+      "case": "scan",
+      "measures": 6,
+      "seed": 7,
+      "truth": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/fixture/scan_m6_s7_truth.musicxml",
+      "image": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/fixture/scan_m6_s7.png",
+      "sha256": {
+        "truth": "37e277b0dd91e7344f0ac6387147ce119c036663aa2903422ab3c6846343ed12",
+        "pdf": "9c86e4ca2c6b7b669a4a2a8748368e84b96244b119f95ccb1fa60407d1f86265",
+        "image": "f8f824843d5c5629c4e1e596ccd63675791b20bfe2056b721316431eff4bf6e8"
+      },
+      "degrade": {
+        "mode": "scan",
+        "seed": 7,
+        "in_size": [
+          2480,
+          3509
+        ],
+        "noise_operations": 13053,
+        "rotation_deg": -0.123,
+        "blur_radius": 0.6,
+        "contrast": 0.86,
+        "brightness": 1.04,
+        "resample_ratio": 0.6666666666666666,
+        "jpeg_quality": 38,
+        "out_size": [
+          2480,
+          3509
+        ]
+      },
+      "arms": {
+        "scorehalo": {
+          "rc": 0,
+          "pred": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/scorehalo/p0001.musicxml",
+          "log": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/scorehalo/engine.log",
+          "stderr_tail": "",
+          "seconds": 31.1,
+          "truth_notes": 37,
+          "pred_notes": 37,
+          "exact": 37,
+          "exact_precision": 100.0,
+          "exact_recall": 100.0,
+          "pitch_wrong": 0,
+          "duration_wrong": 0,
+          "both_wrong": 0,
+          "missed": 0,
+          "spurious": 0,
+          "streams": {
+            "(0, '1', '1')": {
+              "truth_notes": 25,
+              "pred_notes": 25,
+              "exact": 25,
+              "pitch_wrong": 0,
+              "duration_wrong": 0,
+              "both_wrong": 0,
+              "missed": 0,
+              "spurious": 0,
+              "pitch_class_only": 0
+            },
+            "(0, '2', '5')": {
+              "truth_notes": 12,
+              "pred_notes": 12,
+              "exact": 12,
+              "pitch_wrong": 0,
+              "duration_wrong": 0,
+              "both_wrong": 0,
+              "missed": 0,
+              "spurious": 0,
+              "pitch_class_only": 0
+            }
+          },
+          "pred_sha256": "33b7acef707ba23858060fa782c28c28b27182e118178e0ec7ddbcde9e40952d"
+        },
+        "audiveris": {
+          "rc": 0,
+          "pred": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/audiveris/scan_m6_s7.extracted.musicxml",
+          "log": "/home/wburt59/scorehalo-upstream/data/ab-runs/20261119-074316-99pe3d2m/scan_m6_s7/audiveris/engine.log",
+          "stderr_tail": "",
+          "seconds": 24.9,
+          "truth_notes": 37,
+          "pred_notes": 37,
+          "exact": 37,
+          "exact_precision": 100.0,
+          "exact_recall": 100.0,
+          "pitch_wrong": 0,
+          "duration_wrong": 0,
+          "both_wrong": 0,
+          "missed": 0,
+          "spurious": 0,
+          "streams": {
+            "(0, '1', '1')": {
+              "truth_notes": 25,
+              "pred_notes": 25,
+              "exact": 25,
+              "pitch_wrong": 0,
+              "duration_wrong": 0,
+              "both_wrong": 0,
+              "missed": 0,
+              "spurious": 0,
+              "pitch_class_only": 0
+            },
+            "(0, '2', '5')": {
+              "truth_notes": 12,
+              "pred_notes": 12,
+              "exact": 12,
+              "pitch_wrong": 0,
+              "duration_wrong": 0,
+              "both_wrong": 0,
+              "missed": 0,
+              "spurious": 0,
+              "pitch_class_only": 0
+            }
+          },
+          "pred_sha256": "8681fc62729f11c45f434e16c5af0537137cadf259255739cea7164f343be285"
+        }
+      },
+      "delta_exact": 0,
+      "delta_precision": 0.0
+    }
+  ]
+}

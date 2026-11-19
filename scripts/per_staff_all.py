@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT / "pysrc"))
 sys.path.insert(0, str(ROOT / "scripts"))
 from scorehalo.layout import analyze_page  # noqa: E402
 from scorehalo.engine import run_homr  # noqa: E402
+from scorehalo import graphics  # noqa: E402
 
 
 def xml_stats(path):
@@ -171,6 +172,7 @@ def verify_run_identity(args, only):
         "inputs": sorted(inputs),
         "pad_frac": args.pad_frac,
         "min_staff_lines": args.min_staff_lines,
+        "mask_graphics": getattr(args, "mask_graphics", False),
         "timeout": args.timeout,
         "engine_id": args.engine_id,
         "runner_hash": file_hash(__file__),
@@ -197,8 +199,15 @@ def verify_run_identity(args, only):
 RESUME_SCHEMA = 3       # bump when a record's meaning changes
 
 
-def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None):
-    """Detect staves once per page; cache deskewed image + staff boxes."""
+def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None,
+               mask_graphics=False):
+    """Detect staves once per page; cache deskewed image + staff boxes.
+
+    ``mask_graphics`` is OPT-IN. A pictured region is erased only where it does
+    not overlap a detected staff (the staff wins on disagreement), and the
+    unmasked deskew is kept on disk. The masked image and every erased box are
+    recorded in ``boxes.json`` so the decision can be audited or A/B'd.
+    """
     with open(manifest) as fh:
         man = json.load(fh)
     pages_out = []
@@ -220,20 +229,30 @@ def prep_pages(render_dir, manifest, out, min_staff_lines=5, pages=None):
         r = analyze_page(gray, min_staff_lines=min_staff_lines)
         dp = os.path.join(out, f"{name}.deskew.png")
         Image.fromarray(r["deskewed"]).save(dp)
-        meta = {"page": name, "deskew": dp, "render": rp,
+        deskew_used, regions = dp, []
+        if mask_graphics:
+            masked, regions = graphics.bypass(r["deskewed"], r["staves"])
+            if regions:
+                deskew_used = os.path.join(out, f"{name}.deskew.masked.png")
+                Image.fromarray(masked).save(deskew_used)
+        meta = {"page": name, "deskew": deskew_used, "render": rp,
                 "n_staves": len(r["staves"]),
                 "n_systems": r["n_systems"],
                 "grouping": [s["n_staves"] for s in r["systems"]],
                 "staff_space": r["staff_space"],
                 "n_slivers_removed": r["n_slivers_removed"],
                 "min_staff_lines": min_staff_lines,
+                "mask_graphics": bool(mask_graphics),
+                "deskew_raw": dp,
+                "graphics_masked": regions,
                 "staves": r["staves"]}
         with open(os.path.join(out, f"{name}.boxes.json"), "w") as fh:
             json.dump(meta, fh, indent=2)
         pages_out.append(meta)
         print(f"  {name}: {meta['n_staves']} staves, grouping "
               f"{'+'.join(map(str, meta['grouping']))}, "
-              f"{r['n_slivers_removed']} slivers removed")
+              f"{r['n_slivers_removed']} slivers removed"
+              + (f", {len(regions)} graphic region(s) masked" if regions else ""))
     return pages_out, skipped
 
 
@@ -364,6 +383,10 @@ def main(argv=None):
     ap.add_argument("--pad-frac", type=float, default=0.12)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--min-staff-lines", type=int, default=5)
+    ap.add_argument("--mask-graphics", action="store_true",
+                    help="opt-in: erase pictured regions that do not touch a "
+                         "staff before staff crops are made; the raw deskew "
+                         "and every erased box are kept for audit")
     ap.add_argument("--pages", default="")
     ap.add_argument("--engine-id", required=True,
                     help="stable model/environment label; change it "
@@ -405,7 +428,8 @@ def main(argv=None):
     print("== analysing pages (once) ==")
     pages, skipped_pages = prep_pages(render_dir, manifest, args.out,
                                       min_staff_lines=args.min_staff_lines,
-                                      pages=only)
+                                      pages=only,
+                                      mask_graphics=args.mask_graphics)
     tasks = [(p["page"], i, args.out, args.pad_frac, args.timeout)
              for p in pages for i in range(len(p["staves"]))]
     todo = list(tasks) if args.force else [t for t in tasks

@@ -157,7 +157,9 @@ def cmd_convert(args):
         # already removed pages that are wholly a picture.
         engine_src = img
         gray = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
-        if gray is not None:
+        if getattr(args, "no_mask_graphics", False):
+            entry["graphics_masked"] = "disabled (--no-mask-graphics)"
+        elif gray is not None:
             regions = graphics.find_graphics(gray)
             if regions:
                 masked_path = os.path.join(out_dir, "masked", f"p{n:04d}.png")
@@ -411,6 +413,9 @@ def main(argv=None):
     conv.add_argument("--pages", default="1-128", help="page spec e.g. 3-8,16")
     conv.add_argument("--dpi", type=int, default=300)
     conv.add_argument("--enhance", action="store_true", help="contrast+sharpen before OMR")
+    conv.add_argument("--no-mask-graphics", action="store_true",
+                      help="A/B only: feed pictured regions to the engine "
+                           "instead of masking them")
     conv.add_argument("--timeout", type=int, default=600)
     conv.set_defaults(fn=cmd_convert)
 
