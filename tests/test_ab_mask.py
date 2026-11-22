@@ -13,11 +13,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pysrc"))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-import ab_mask  # noqa: E402
-import make_fixture  # noqa: E402
-from scorehalo import graphics  # noqa: E402
+try:
+    import ab_mask  # noqa: E402
+    import make_fixture  # noqa: E402
+    from scorehalo import graphics  # noqa: E402
+except ModuleNotFoundError as exc:  # optional PDF dependency on a bare clone
+    if exc.name != "pypdfium2":
+        raise
+    ab_mask = make_fixture = graphics = None
+
+skip_missing_pdf = unittest.skipIf(
+    ab_mask is None, "pypdfium2 not installed")
 
 
+@skip_missing_pdf
 class IllustratedFixtureTests(unittest.TestCase):
 
     def test_added_picture_is_detected_as_a_graphic(self):

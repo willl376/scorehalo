@@ -15,10 +15,19 @@ from PIL import Image
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pysrc"))
 
-from scorehalo import cli  # noqa: E402
-from scorehalo.cli import _deprecated  # noqa: E402
+try:
+    from scorehalo import cli  # noqa: E402
+    from scorehalo.cli import _deprecated  # noqa: E402
+except ModuleNotFoundError as exc:  # optional PDF dependency on a bare clone
+    if exc.name != "pypdfium2":
+        raise
+    cli = _deprecated = None
+
+skip_missing_pdf = unittest.skipIf(
+    cli is None, "pypdfium2 not installed")
 
 
+@skip_missing_pdf
 class DeprecationTests(unittest.TestCase):
 
     def test_warning_names_the_verb_and_the_replacement(self):
@@ -30,6 +39,7 @@ class DeprecationTests(unittest.TestCase):
         self.assertIn("use the per-staff pipeline", text)
 
 
+@skip_missing_pdf
 class ConvertControlTests(unittest.TestCase):
 
     def test_no_mask_graphics_flag_reaches_convert(self):

@@ -15,7 +15,15 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-import ab_engines  # noqa: E402
+try:
+    import ab_engines  # noqa: E402
+except ModuleNotFoundError as exc:  # optional PDF dependency on a bare clone
+    if exc.name != "pypdfium2":
+        raise
+    ab_engines = None
+
+skip_missing_pdf = unittest.skipIf(
+    ab_engines is None, "pypdfium2 not installed")
 
 
 def score_xml(pitch="C", octave=4, duration=4):
@@ -50,6 +58,7 @@ class FakeProc:
         self.stderr = stderr
 
 
+@skip_missing_pdf
 class HelperTests(unittest.TestCase):
 
     def test_sha256_changes_with_content(self):
@@ -99,6 +108,7 @@ class HelperTests(unittest.TestCase):
         self.assertIn("ERROR", text)
 
 
+@skip_missing_pdf
 class RunnerTests(unittest.TestCase):
 
     def test_scorehalo_runner_uses_fresh_dir_and_checks_rc(self):
@@ -162,6 +172,7 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(arm["pred"]))
 
 
+@skip_missing_pdf
 class ScoringTests(unittest.TestCase):
 
     def test_score_prediction_counts_exact_and_rejects_bad_arm(self):
