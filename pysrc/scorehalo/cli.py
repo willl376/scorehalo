@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cv2  # noqa: E402
 
 from scorehalo import __version__, pdf, engine, validate, preprocess, repair
-from scorehalo import graphics  # noqa: E402
+from scorehalo import graphics, gate_rotation  # noqa: E402
 
 
 def parse_pages(spec, count):
@@ -173,8 +173,37 @@ def cmd_convert(args):
         if getattr(args, "no_photo_gate", False):
             entry["photo_gate"] = "disabled (--no-photo-gate)"
         else:
-            music_ok, stats_note, _verdict = preprocess.is_music_page(engine_src)
+            music_ok, stats_note, verdict = preprocess.is_music_page(engine_src)
             entry["stats"] = stats_note if isinstance(stats_note, dict) else {"note": stats_note}
+            # Opt-in fallback for ROTATED pages only. The gate measures long
+            # horizontal runs, so a few degrees of skew makes a music page
+            # look blank and convert silently produces zero notes. Search a
+            # small angle window and retry the SAME gate; a page the gate
+            # already accepts never reaches this code. Log the decision so a
+            # reviewer can see why a different image went to the engine.
+            if not music_ok and getattr(args, "rotation_tolerant_gate", False):
+                prepared = os.path.join(out_dir, "rotated", f"p{n:04d}.png")
+                attempt = gate_rotation.prepare_for_gate(
+                    engine_src, prepared, gate_ok=music_ok)
+                entry["rotation_gate"] = {
+                    "activated": attempt["activated"],
+                    "chosen_angle_deg": attempt["chosen_angle"],
+                    "before": attempt["before"],
+                    "after": attempt["after"],
+                    "image": os.path.relpath(prepared, out_dir),
+                    "accepted": False,
+                }
+                retry_ok, retry_stats, retry_why = preprocess.is_music_page(prepared)
+                if retry_ok:
+                    engine_src = prepared
+                    music_ok, stats_note, verdict = retry_ok, retry_stats, retry_why
+                    entry["stats"] = (retry_stats if isinstance(retry_stats, dict)
+                                      else {"note": retry_stats})
+                    entry["rotation_gate"]["accepted"] = True
+                    print(f"[p{n}] rotation gate: levelled by "
+                          f"{attempt['chosen_angle']:+.1f} deg; page accepted")
+                else:
+                    entry["rotation_gate"]["reason"] = retry_why
             if not music_ok:
                 entry["status"] = "skipped-not-music"
                 print(f"[p{n}] {stats_note}")
@@ -426,6 +455,11 @@ def main(argv=None):
                       help="A/B only: do not skip pages that look pictured; "
                            "used with --no-mask-graphics to score an "
                            "illustrated fixture note by note")
+    conv.add_argument("--rotation-tolerant-gate", action="store_true",
+                      help="opt-in: if the page gate rejects a skewed page, "
+                           "search a small angle window and retry the gate "
+                           "on the levelled copy. Pages the gate already "
+                           "accepts are passed through byte-for-byte.")
     conv.add_argument("--timeout", type=int, default=600)
     conv.set_defaults(fn=cmd_convert)
 

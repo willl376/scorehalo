@@ -172,6 +172,8 @@ second-guess.
 
 ```
 scorehalo convert <file.pdf|image.png> --pages 20-22 --out dir [--enhance] [--dpi 300]
+                                  # opt in to skew rescue:
+                                  #   [--rotation-tolerant-gate]
 scorehalo validate dir          # re-check outputs
 scorehalo join dir              # (re)assemble score.musicxml + score.mxl
 scorehalo score --truth ref.musicxml --pred dir/p0020.musicxml
@@ -386,6 +388,26 @@ Equal note scores do **not** prove masking harmless on real photographs, so the
 production per-staff pipeline keeps `--mask-graphics` **opt-in**; only the
 legacy whole-page `convert` path masks by default. No source-accuracy claim is
 made by either A/B.
+
+### Rotation-tolerant page gate (opt-in)
+
+`scorehalo convert ... --rotation-tolerant-gate` rescues music pages that the
+page gate would otherwise silently skip when they are skewed. The gate counts
+long horizontal runs, so even a few degrees of rotation can make it report
+zero staff-like rows and `convert` exits rc=0 with `pages ok: 0/1` — zero notes,
+not a low score. The fallback searches −5…+5° in 0.5° steps and retries the
+**same unchanged gate** on the levelled copy. Pages the gate accepts are
+passed through byte-for-byte; if no angle looks like music, the original is
+kept and the page is still skipped (covers, blanks and text pages stay skipped).
+
+This is **gate availability**, not better OMR: on the labelled 6-measure
+fixture homr already scored 37/37 on the skewed pixels when forced past the
+gate. The opt-in flag recovered 0 → 37 notes on every skewed fixture case
+(±3°, ±5°, scan+skew) with no regression on straight pages, and rescued a real
+Carpenters scan rotated by 3°. The chosen angle and before/after gate stats
+are recorded in `manifest.json` under `rotation_gate` for review. There is no
+real-book note ground truth for the real-scan A/B, so no source-accuracy claim
+is made. Evidence: `~/Documents/omr_workspace/deskew-experiment-2026-11-22/`.
 
 ## Layout
 
